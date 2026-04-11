@@ -56,7 +56,7 @@ export function FeedList({ items, nowMs }: FeedListProps) {
 
   return (
     <section aria-live="polite">
-      {topOpportunity ? <TopOpportunity item={topOpportunity} nowMs={nowMs} /> : null}
+      <TopOpportunity key={topOpportunity?.id ?? "no-top-opportunity"} item={topOpportunity} nowMs={nowMs} />
       {highPriority.length > 0 ? (
         <div className="border-b border-slate-800/80 bg-slate-950/80">
           <div className="px-3 py-1.5 text-[11px] font-bold tracking-widest text-amber-300">
