@@ -7,7 +7,7 @@ public class SignalBackgroundService : BackgroundService
     private static readonly TimeSpan NoDataWarningWindow = TimeSpan.FromSeconds(10);
     private readonly SignalEngine _signalEngine;
     private readonly FeedService _feedService;
-    private readonly NewsService _newsService;
+    private readonly NewsAggregationService _newsAggregationService;
     private readonly SymbolUniverseService _symbolUniverseService;
     private readonly ILogger<SignalBackgroundService> _logger;
     private readonly TimeSpan _refreshInterval;
@@ -19,14 +19,14 @@ public class SignalBackgroundService : BackgroundService
     public SignalBackgroundService(
         SignalEngine signalEngine,
         FeedService feedService,
-        NewsService newsService,
+        NewsAggregationService newsAggregationService,
         SymbolUniverseService symbolUniverseService,
         IConfiguration configuration,
         ILogger<SignalBackgroundService> logger)
     {
         _signalEngine = signalEngine;
         _feedService = feedService;
-        _newsService = newsService;
+        _newsAggregationService = newsAggregationService;
         _symbolUniverseService = symbolUniverseService;
         _logger = logger;
         _refreshInterval = TimeSpan.FromSeconds(Math.Clamp(configuration.GetValue<int?>("Scanner:IntervalSeconds") ?? 15, 8, 60));
@@ -57,6 +57,29 @@ public class SignalBackgroundService : BackgroundService
                 await _feedService.AddSignalAsync(signal, stoppingToken);
             }
 
+            if (batchResult.Signals.Count == 0)
+            {
+                await _feedService.AddItemAsync(new FeedItem
+                {
+                    Symbol = "SPY",
+                    CountryCode = "US",
+                    Price = 0m,
+                    PriceRange = "N/A",
+                    ChangePercent = 0m,
+                    SignalType = "TRENDING",
+                    Score = 5m,
+                    ActivityScore = 5m,
+                    Confidence = "LOW",
+                    TradeReadiness = "WATCH",
+                    Headline = "Market heartbeat: waiting for stronger live confluence signals.",
+                    Reason = "Fallback heartbeat signal keeps feed active.",
+                    Reasons = ["Fallback heartbeat"],
+                    Sentiment = "NEUTRAL",
+                    Source = "SYSTEM",
+                    Timestamp = DateTimeOffset.UtcNow
+                }, stoppingToken);
+            }
+
             if (DateTimeOffset.UtcNow >= _nextNewsPull)
             {
                 var symbols = CachedSignals
@@ -75,7 +98,7 @@ public class SignalBackgroundService : BackgroundService
                     symbols.AddRange(universeSlice);
                 }
 
-                var newsItems = await _newsService.PullFreshNewsAsync(symbols, stoppingToken);
+                var newsItems = await _newsAggregationService.PullFreshNewsAsync(symbols, stoppingToken);
                 foreach (var news in newsItems)
                 {
                     await _feedService.AddNewsAsync(news, stoppingToken);

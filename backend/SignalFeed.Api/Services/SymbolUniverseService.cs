@@ -4,6 +4,11 @@ namespace SignalFeed.Api.Services;
 
 public sealed class SymbolUniverseService
 {
+    private static readonly List<string> DefaultSymbols =
+    [
+        "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "AMD", "GOOGL", "NFLX", "PLTR"
+    ];
+
     private readonly FinnhubService _finnhubService;
     private readonly ILogger<SymbolUniverseService> _logger;
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
@@ -23,6 +28,11 @@ public sealed class SymbolUniverseService
         if (_symbols.Count == 0)
         {
             await RefreshUniverseAsync(cancellationToken);
+            if (_symbols.Count == 0)
+            {
+                _symbols = DefaultSymbols.ToList();
+                _logger.LogWarning("Using default symbol universe fallback with {Count} symbols.", _symbols.Count);
+            }
         }
 
         return _symbols;
@@ -44,7 +54,17 @@ public sealed class SymbolUniverseService
 
             if (filtered.Count == 0)
             {
-                _logger.LogWarning("Symbol universe refresh returned zero eligible symbols. Keeping previous cache.");
+                if (_symbols.Count == 0)
+                {
+                    _symbols = DefaultSymbols.ToList();
+                    _lastRefresh = DateTimeOffset.UtcNow;
+                    _logger.LogWarning("Symbol universe refresh returned zero symbols. Using default fallback list.");
+                }
+                else
+                {
+                    _logger.LogWarning("Symbol universe refresh returned zero eligible symbols. Keeping previous cache.");
+                }
+
                 return;
             }
 
