@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Caching.Memory;
 using SignalFeed.Api.Models;
 
 namespace SignalFeed.Api.Services;
@@ -30,21 +31,32 @@ public sealed class NewsAggregationService
 
     private readonly ExternalNewsApiService _newsApiService;
     private readonly NewsService _finnhubNewsService;
+    private readonly IMemoryCache _cache;
     private readonly ILogger<NewsAggregationService> _logger;
 
     public NewsAggregationService(
         ExternalNewsApiService newsApiService,
         NewsService finnhubNewsService,
+        IMemoryCache cache,
         ILogger<NewsAggregationService> logger)
     {
         _newsApiService = newsApiService;
         _finnhubNewsService = finnhubNewsService;
+        _cache = cache;
         _logger = logger;
     }
 
     public async Task<NormalizedNewsItem?> GetLatestNewsAsync(string symbol, CancellationToken cancellationToken = default)
     {
         var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+        var cacheKey = $"news:{normalizedSymbol}";
+        if (_cache.TryGetValue<NormalizedNewsItem>(cacheKey, out var cached) && cached is not null)
+        {
+            _logger.LogInformation("Cache HIT {key}", cacheKey);
+            return cached;
+        }
+
+        _logger.LogInformation("Cache MISS {key}", cacheKey);
         var newsApiArticles = await _newsApiService.GetLatestArticlesAsync(normalizedSymbol, 5, cancellationToken);
         var externalNews = newsApiArticles
             .Select(article => Normalize(normalizedSymbol, article))
@@ -55,6 +67,7 @@ public sealed class NewsAggregationService
         if (externalNews is not null)
         {
             _logger.LogInformation("NewsAPI used for {Symbol}.", normalizedSymbol);
+            _cache.Set(cacheKey, externalNews, TimeSpan.FromSeconds(60));
             return externalNews;
         }
 
@@ -62,6 +75,7 @@ public sealed class NewsAggregationService
         if (finnhubNews is not null)
         {
             _logger.LogInformation("Finnhub news fallback used for {Symbol}.", normalizedSymbol);
+            _cache.Set(cacheKey, finnhubNews, TimeSpan.FromSeconds(60));
         }
 
         return finnhubNews;
