@@ -61,6 +61,7 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+Console.WriteLine("=== NEW DEPLOY VERSION ===");
 
 app.UseCors("AllowFrontend");
 app.MapGet("/", () => Results.Ok(new

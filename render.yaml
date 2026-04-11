@@ -5,6 +5,7 @@ services:
     plan: free
     region: ohio
     rootDir: backend/SignalFeed.Api
+    branch: main
     buildCommand: dotnet restore && dotnet build --configuration Release --no-restore
     startCommand: dotnet run --urls=http://0.0.0.0:10000
     healthCheckPath: /health
