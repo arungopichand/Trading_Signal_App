@@ -63,6 +63,14 @@ builder.Services.AddCors(options =>
 var app = builder.Build();
 
 app.UseCors("ScannerCors");
+app.MapGet("/", () => Results.Ok(new
+{
+    name = "Trading Signal API",
+    status = "running",
+    health = "/health",
+    symbols = "/api/symbols",
+    signals = "/api/signals/current"
+}));
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 app.MapControllers();
 
