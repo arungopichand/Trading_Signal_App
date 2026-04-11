@@ -1,28 +1,52 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Caching.Memory;
 using SignalFeed.Api.Models;
 
 namespace SignalFeed.Api.Services;
 
 public sealed class MarketDataService : IMarketDataService
 {
+    private sealed record PriceCacheEntry(
+        decimal CurrentPrice,
+        decimal ChangePercent,
+        decimal PreviousClose,
+        decimal OpenPrice,
+        decimal HighPrice,
+        decimal LowPrice,
+        decimal Volume,
+        string PriceSource,
+        string VolumeSource);
+
+    private sealed record CachedNewsValue(NormalizedNewsItem? Value);
+    private sealed record CachedFundamentalsValue(FmpFactors? Value);
+
+    private static readonly TimeSpan PriceTtl = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan NewsTtl = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan FundamentalsTtl = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan TopOpportunityBypassWindow = TimeSpan.FromSeconds(20);
+
     private readonly FinnhubService _finnhubService;
     private readonly PolygonService _polygonService;
     private readonly NewsAggregationService _newsAggregationService;
     private readonly FmpService _fmpService;
+    private readonly IMemoryCache _cache;
     private readonly ILogger<MarketDataService> _logger;
     private readonly ConcurrentDictionary<string, UnifiedMarketData> _lastKnownBySymbol = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _forceFreshSymbols = new(StringComparer.Ordinal);
 
     public MarketDataService(
         FinnhubService finnhubService,
         PolygonService polygonService,
         NewsAggregationService newsAggregationService,
         FmpService fmpService,
+        IMemoryCache cache,
         ILogger<MarketDataService> logger)
     {
         _finnhubService = finnhubService;
         _polygonService = polygonService;
         _newsAggregationService = newsAggregationService;
         _fmpService = fmpService;
+        _cache = cache;
         _logger = logger;
     }
 
@@ -32,16 +56,23 @@ public sealed class MarketDataService : IMarketDataService
         CancellationToken cancellationToken = default)
     {
         var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+        var marketCacheKey = $"market:{normalizedSymbol}";
+        if (!ShouldBypassUnifiedCache(normalizedSymbol, DateTimeOffset.UtcNow) &&
+            _cache.TryGetValue<UnifiedMarketData>(marketCacheKey, out var cachedUnified) &&
+            cachedUnified is not null)
+        {
+            _logger.LogInformation("CACHE HIT {symbol}", normalizedSymbol);
+            return cachedUnified;
+        }
 
-        var finnhubQuoteTask = _finnhubService.GetQuoteAsync(normalizedSymbol);
-        var polygonSnapshotTask = _polygonService.GetSnapshotAsync(normalizedSymbol, cancellationToken);
-        var polygonAggregateTask = _polygonService.GetPreviousAggregateAsync(normalizedSymbol, cancellationToken);
-        var factorsTask = _fmpService.GetFactorsAsync(normalizedSymbol, cancellationToken);
+        _logger.LogInformation("CACHE MISS {symbol}", normalizedSymbol);
+        var priceTask = GetOrLoadPriceAsync(normalizedSymbol, cancellationToken);
+        var factorsTask = GetOrLoadFundamentalsAsync(normalizedSymbol, cancellationToken);
         Task<NormalizedNewsItem?>? newsTask = includeNews
-            ? _newsAggregationService.GetLatestNewsAsync(normalizedSymbol, cancellationToken)
+            ? GetOrLoadNewsAsync(normalizedSymbol, cancellationToken)
             : null;
 
-        var tasks = new List<Task> { finnhubQuoteTask, polygonSnapshotTask, polygonAggregateTask, factorsTask };
+        var tasks = new List<Task> { priceTask, factorsTask };
         if (newsTask is not null)
         {
             tasks.Add(newsTask);
@@ -49,11 +80,92 @@ public sealed class MarketDataService : IMarketDataService
 
         await Task.WhenAll(tasks);
 
+        var price = priceTask.Result;
+        var factors = factorsTask.Result;
+        var news = newsTask?.Result;
+
+        var sentiment = ResolveSentiment(news, price.ChangePercent);
+        var result = BuildAndCache(
+            normalizedSymbol,
+            price.CurrentPrice,
+            price.ChangePercent,
+            price.PreviousClose,
+            price.OpenPrice,
+            price.HighPrice,
+            price.LowPrice,
+            price.Volume,
+            news,
+            sentiment,
+            factors?.MarketCap,
+            factors?.FloatShares,
+            factors?.InstitutionalOwnership,
+            price.PriceSource,
+            price.VolumeSource);
+
+        if (result is not null)
+        {
+            var ttlSeconds = ResolveUnifiedTtlSeconds(result);
+            _cache.Set(marketCacheKey, result, TimeSpan.FromSeconds(ttlSeconds));
+        }
+
+        return result!;
+    }
+
+    private async Task<PriceCacheEntry> GetOrLoadPriceAsync(string symbol, CancellationToken cancellationToken)
+    {
+        var cacheKey = $"price:{symbol}";
+        if (_cache.TryGetValue<PriceCacheEntry>(cacheKey, out var cached) && cached is not null)
+        {
+            _logger.LogInformation("Cache HIT {key}", cacheKey);
+            return cached;
+        }
+
+        _logger.LogInformation("Cache MISS {key}", cacheKey);
+        var value = await FetchPriceAsync(symbol, cancellationToken);
+        _cache.Set(cacheKey, value, PriceTtl);
+        return value;
+    }
+
+    private async Task<NormalizedNewsItem?> GetOrLoadNewsAsync(string symbol, CancellationToken cancellationToken)
+    {
+        var cacheKey = $"news:{symbol}";
+        if (_cache.TryGetValue<CachedNewsValue>(cacheKey, out var cached))
+        {
+            _logger.LogInformation("Cache HIT {key}", cacheKey);
+            return cached?.Value;
+        }
+
+        _logger.LogInformation("Cache MISS {key}", cacheKey);
+        var news = await _newsAggregationService.GetLatestNewsAsync(symbol, cancellationToken);
+        _cache.Set(cacheKey, new CachedNewsValue(news), NewsTtl);
+        return news;
+    }
+
+    private async Task<FmpFactors?> GetOrLoadFundamentalsAsync(string symbol, CancellationToken cancellationToken)
+    {
+        var cacheKey = $"fundamentals:{symbol}";
+        if (_cache.TryGetValue<CachedFundamentalsValue>(cacheKey, out var cached))
+        {
+            _logger.LogInformation("Cache HIT {key}", cacheKey);
+            return cached?.Value;
+        }
+
+        _logger.LogInformation("Cache MISS {key}", cacheKey);
+        var factors = await _fmpService.GetFactorsAsync(symbol, cancellationToken);
+        _cache.Set(cacheKey, new CachedFundamentalsValue(factors), FundamentalsTtl);
+        return factors;
+    }
+
+    private async Task<PriceCacheEntry> FetchPriceAsync(string normalizedSymbol, CancellationToken cancellationToken)
+    {
+        var finnhubQuoteTask = _finnhubService.GetQuoteAsync(normalizedSymbol);
+        var polygonSnapshotTask = _polygonService.GetSnapshotAsync(normalizedSymbol, cancellationToken);
+        var polygonAggregateTask = _polygonService.GetPreviousAggregateAsync(normalizedSymbol, cancellationToken);
+        await Task.WhenAll(finnhubQuoteTask, polygonSnapshotTask, polygonAggregateTask);
+
         var finnhubQuote = finnhubQuoteTask.Result;
         var polygonSnapshot = polygonSnapshotTask.Result;
         var polygonAggregate = polygonAggregateTask.Result;
-        var factors = factorsTask.Result;
-        var news = newsTask?.Result;
 
         var polygonPrice = polygonSnapshot?.LastTrade?.Price ?? 0m;
         if (polygonPrice <= 0m)
@@ -111,23 +223,16 @@ public sealed class MarketDataService : IMarketDataService
             highPrice = cached.Quote.High > 0 ? cached.Quote.High : currentPrice;
             lowPrice = cached.Quote.Low > 0 ? cached.Quote.Low : currentPrice;
             volume = cached.Volume;
-            var fallbackSentiment = ResolveSentiment(news, changePercent);
-            return BuildAndCache(
-                normalizedSymbol,
-                currentPrice,
-                changePercent,
-                previousClose,
-                openPrice,
-                highPrice,
-                lowPrice,
-                volume,
-                news,
-                fallbackSentiment,
-                cached.MarketCap ?? factors?.MarketCap,
-                cached.FloatShares ?? factors?.FloatShares,
-                cached.InstitutionalOwnership ?? factors?.InstitutionalOwnership,
-                priceSource: "CACHED_FALLBACK",
-                volumeSource: cached.VolumeSource);
+            return new PriceCacheEntry(
+                CurrentPrice: currentPrice,
+                ChangePercent: changePercent,
+                PreviousClose: previousClose,
+                OpenPrice: openPrice,
+                HighPrice: highPrice,
+                LowPrice: lowPrice,
+                Volume: volume,
+                PriceSource: "CACHED_FALLBACK",
+                VolumeSource: cached.VolumeSource);
         }
         else
         {
@@ -171,23 +276,16 @@ public sealed class MarketDataService : IMarketDataService
             lowPrice = polygonAggregate?.Low > 0m ? polygonAggregate.Low : currentPrice;
         }
 
-        var sentiment = ResolveSentiment(news, changePercent);
-        return BuildAndCache(
-            normalizedSymbol,
-            currentPrice,
-            changePercent,
-            previousClose,
-            openPrice,
-            highPrice,
-            lowPrice,
-            volume,
-            news,
-            sentiment,
-            factors?.MarketCap,
-            factors?.FloatShares,
-            factors?.InstitutionalOwnership,
-            priceSource,
-            volumeSource);
+        return new PriceCacheEntry(
+            CurrentPrice: currentPrice,
+            ChangePercent: changePercent,
+            PreviousClose: previousClose,
+            OpenPrice: openPrice,
+            HighPrice: highPrice,
+            LowPrice: lowPrice,
+            Volume: volume,
+            PriceSource: priceSource,
+            VolumeSource: volumeSource);
     }
 
     private UnifiedMarketData BuildAndCache(
@@ -249,5 +347,36 @@ public sealed class MarketDataService : IMarketDataService
     public async Task<UnifiedMarketData?> GetUnifiedMarketData(string symbol, CancellationToken cancellationToken = default)
     {
         return await GetUnifiedMarketDataAsync(symbol, includeNews: true, cancellationToken);
+    }
+
+    public void MarkTopOpportunity(string symbol)
+    {
+        if (string.IsNullOrWhiteSpace(symbol))
+        {
+            return;
+        }
+
+        _forceFreshSymbols[symbol.Trim().ToUpperInvariant()] = DateTimeOffset.UtcNow;
+    }
+
+    private bool ShouldBypassUnifiedCache(string symbol, DateTimeOffset now)
+    {
+        if (_forceFreshSymbols.TryGetValue(symbol, out var markedAt))
+        {
+            if (now - markedAt <= TopOpportunityBypassWindow)
+            {
+                return true;
+            }
+
+            _forceFreshSymbols.TryRemove(symbol, out _);
+        }
+
+        return false;
+    }
+
+    private static int ResolveUnifiedTtlSeconds(UnifiedMarketData result)
+    {
+        var highVolatility = Math.Abs(result.ChangePercent) >= 3m;
+        return highVolatility ? 4 : 9;
     }
 }

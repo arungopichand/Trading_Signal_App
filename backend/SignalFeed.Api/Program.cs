@@ -24,6 +24,7 @@ builder.Services.Configure<HostOptions>(options =>
 
 builder.Services.AddControllers();
 builder.Services.AddSignalR();
+builder.Services.AddMemoryCache();
 
 builder.Services.AddHttpClient<FinnhubService>(client =>
 {
@@ -73,8 +74,9 @@ builder.Services.AddHttpClient<SupabaseDataService>(client =>
 builder.Services.AddSingleton<SymbolUniverseService>();
 builder.Services.AddSingleton<NewsService>();
 builder.Services.AddSingleton<NewsAggregationService>();
-builder.Services.AddScoped<IMarketDataService, MarketDataService>();
 builder.Services.AddSingleton<MarketDataService>();
+builder.Services.AddSingleton<IMarketDataService>(serviceProvider =>
+    serviceProvider.GetRequiredService<MarketDataService>());
 builder.Services.AddSingleton<FeedService>();
 builder.Services.AddSingleton<SignalEngine>();
 builder.Services.AddSingleton<SimulationSignalService>();
