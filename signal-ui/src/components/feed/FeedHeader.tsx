@@ -10,9 +10,10 @@ interface FeedHeaderProps {
   onSoundEnabledChange: (enabled: boolean) => void;
   onSimulationModeChange: (enabled: boolean) => void;
   status: "live" | "degraded" | "offline";
+  simulationStatsLabel?: string;
 }
 
-const filters: FeedFilter[] = ["ALL", "SPIKE", "BULLISH", "BEARISH", "NEWS"];
+const filters: FeedFilter[] = ["ALL", "SPIKE", "BULLISH", "BEARISH", "TRENDING", "NEWS"];
 
 export function FeedHeader({
   filter,
@@ -24,6 +25,7 @@ export function FeedHeader({
   onSoundEnabledChange,
   onSimulationModeChange,
   status,
+  simulationStatsLabel,
 }: FeedHeaderProps) {
   const statusDot =
     status === "live" ? "bg-emerald-400" : status === "degraded" ? "bg-amber-400" : "bg-red-400";
@@ -35,6 +37,11 @@ export function FeedHeader({
         <div className="flex items-center gap-2">
           <span className={`h-2 w-2 rounded-full ${statusDot}`} />
           <span className="font-semibold tracking-wide">{statusLabel}</span>
+          {simulationMode && simulationStatsLabel ? (
+            <span className="rounded border border-amber-600/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-semibold text-amber-200">
+              {simulationStatsLabel}
+            </span>
+          ) : null}
         </div>
         <div className="flex items-center gap-2">
           {filters.map((value) => (
@@ -78,14 +85,9 @@ export function FeedHeader({
           </button>
         </div>
       </div>
-      <div className="grid grid-cols-[130px_100px_92px_180px_minmax(0,1fr)_92px_92px] gap-2 border-t border-slate-800 px-4 py-2 text-[11px] font-bold tracking-widest text-slate-400">
-        <span>SYMBOL</span>
-        <span>PRICE</span>
-        <span>CHANGE%</span>
-        <span>SIGNAL</span>
-        <span>NEWS</span>
-        <span>TIME</span>
-        <span>SOURCE</span>
+      <div className="flex items-center justify-between border-t border-slate-800 px-3 py-1.5 text-[11px] font-bold tracking-widest text-slate-500">
+        <span>SYMBOL | SIGNAL | HEADLINE | FACTORS | TIME</span>
+        <span className="hidden md:block">DENSE TERMINAL FEED</span>
       </div>
     </header>
   );

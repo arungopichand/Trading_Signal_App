@@ -6,13 +6,27 @@ public sealed class NewsService
 {
     private static readonly string[] PositiveKeywords =
     [
-        "surge", "beats", "strong", "partnership", "contract", "approval", "launch", "record", "growth", "profit"
+        "surge", "beats", "beat", "strong", "partnership", "contract", "approval", "launch", "record", "growth",
+        "profit", "raises guidance", "upgrade", "buyback", "wins contract", "fda approval"
     ];
 
     private static readonly string[] NegativeKeywords =
     [
-        "offering", "dilution", "lawsuit", "investigation", "drop", "decline", "misses", "downgrade", "loss", "bankruptcy"
+        "offering", "dilution", "lawsuit", "investigation", "drop", "decline", "misses", "miss", "downgrade",
+        "loss", "bankruptcy", "cuts guidance", "sec probe", "delay", "halt", "recall"
     ];
+
+    private static readonly Dictionary<string, string[]> CategoryKeywords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["earnings"] = ["earnings", "eps", "guidance", "revenue", "profit", "forecast"],
+        ["analyst"] = ["analyst", "downgrade", "upgrade", "price target", "rating"],
+        ["product"] = ["launch", "product", "platform", "release", "approval", "patent"],
+        ["acquisition"] = ["acquisition", "acquire", "merger", "buyout", "takeover"],
+        ["legal"] = ["lawsuit", "legal", "investigation", "sec", "probe", "settlement"],
+        ["contract"] = ["contract", "deal", "partnership", "agreement", "order", "award"],
+        ["fda"] = ["fda", "phase", "trial", "clinical", "drug", "approval"],
+        ["market commentary"] = ["market", "sector", "macro", "fed", "economy", "commentary"]
+    };
 
     private readonly FinnhubService _finnhubService;
     private readonly ILogger<NewsService> _logger;
@@ -107,6 +121,8 @@ public sealed class NewsService
     private static NormalizedNewsItem Normalize(string symbol, NewsItem news)
     {
         var score = ScoreSentiment(news.Headline, news.Summary);
+        var sentiment = ResolveSentiment(score);
+        var category = ResolveCategory(news.Headline, news.Summary);
         return new NormalizedNewsItem
         {
             Symbol = symbol,
@@ -115,7 +131,9 @@ public sealed class NewsService
             Source = string.IsNullOrWhiteSpace(news.Source) ? "NEWS" : news.Source.Trim(),
             Url = news.Url.Trim(),
             Datetime = DateTimeOffset.FromUnixTimeSeconds(Math.Max(news.Datetime, 0)),
-            SentimentScore = score
+            SentimentScore = score,
+            Sentiment = sentiment,
+            Category = category
         };
     }
 
@@ -126,5 +144,34 @@ public sealed class NewsService
         var negativeHits = NegativeKeywords.Count(text.Contains);
         var score = (positiveHits - negativeHits) / 3m;
         return Math.Clamp(score, -1m, 1m);
+    }
+
+    private static string ResolveSentiment(decimal score)
+    {
+        if (score > 0.2m)
+        {
+            return "BULLISH";
+        }
+
+        if (score < -0.2m)
+        {
+            return "BEARISH";
+        }
+
+        return "NEUTRAL";
+    }
+
+    private static string ResolveCategory(string headline, string summary)
+    {
+        var text = $"{headline} {summary}".ToLowerInvariant();
+        foreach (var pair in CategoryKeywords)
+        {
+            if (pair.Value.Any(text.Contains))
+            {
+                return pair.Key;
+            }
+        }
+
+        return "market commentary";
     }
 }

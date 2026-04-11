@@ -18,4 +18,10 @@ public class QuoteResponse
 
     [JsonPropertyName("v")]
     public decimal Volume { get; set; }
+
+    [JsonPropertyName("o")]
+    public decimal OpenPrice { get; set; }
+
+    [JsonPropertyName("t")]
+    public long Timestamp { get; set; }
 }

@@ -15,4 +15,8 @@ public sealed class NormalizedNewsItem
     public DateTimeOffset Datetime { get; set; }
 
     public decimal SentimentScore { get; set; }
+
+    public string Sentiment { get; set; } = "NEUTRAL";
+
+    public string Category { get; set; } = "market commentary";
 }

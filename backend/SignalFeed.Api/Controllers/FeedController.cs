@@ -10,15 +10,31 @@ namespace SignalFeed.Api.Controllers;
 public sealed class FeedController : ControllerBase
 {
     private readonly FeedService _feedService;
+    private readonly SimulationSignalService _simulationSignalService;
 
-    public FeedController(FeedService feedService)
+    public FeedController(FeedService feedService, SimulationSignalService simulationSignalService)
     {
         _feedService = feedService;
+        _simulationSignalService = simulationSignalService;
     }
 
     [HttpGet]
     public ActionResult<IReadOnlyList<FeedItem>> GetFeed()
     {
         return Ok(_feedService.GetLatest());
+    }
+
+    [HttpGet("simulate")]
+    public async Task<ActionResult<IReadOnlyList<FeedItem>>> GetSimulatedFeed(CancellationToken cancellationToken)
+    {
+        var items = await _simulationSignalService.GenerateFeedBatchAsync(cancellationToken);
+        return Ok(items);
+    }
+
+    [HttpGet("sim-stats")]
+    public ActionResult<SimulationStatsSnapshot> GetSimulationStats()
+    {
+        var snapshot = _simulationSignalService.GetStatsSnapshot();
+        return Ok(snapshot);
     }
 }

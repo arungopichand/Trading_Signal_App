@@ -8,6 +8,8 @@ const localhostBaseUrl = "http://localhost:5000";
 
 export const API = (configuredApi && configuredApi.length > 0 ? configuredApi : defaultBaseUrl).replace(/\/$/, "");
 export const FEED_URL = `${API}/api/feed`;
+export const FEED_SIM_URL = `${API}/api/feed/simulate`;
+export const FEED_SIM_STATS_URL = `${API}/api/feed/sim-stats`;
 
 export const FEED_HUB_URL = (() => {
   if (configuredHub && configuredHub.length > 0) {

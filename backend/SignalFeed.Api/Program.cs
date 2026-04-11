@@ -44,6 +44,7 @@ builder.Services.AddSingleton<SymbolUniverseService>();
 builder.Services.AddSingleton<NewsService>();
 builder.Services.AddSingleton<FeedService>();
 builder.Services.AddSingleton<SignalEngine>();
+builder.Services.AddSingleton<SimulationSignalService>();
 builder.Services.AddHostedService<UniverseRefreshBackgroundService>();
 builder.Services.AddHostedService<SignalBackgroundService>();
 builder.Services.AddHostedService<FinnhubRealtimeStreamService>();

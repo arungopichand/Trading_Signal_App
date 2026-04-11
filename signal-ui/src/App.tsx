@@ -3,22 +3,50 @@ import { HubConnection, HubConnectionBuilder, HttpTransportType, LogLevel } from
 import { FeedHeader } from "./components/feed/FeedHeader";
 import { FeedList } from "./components/feed/FeedList";
 import type { FeedFilter, FeedItem } from "./components/feed/types";
-import { FEED_HUB_URL, FEED_URL } from "./config/api";
+import { getPriceRange } from "./components/feed/utils";
+import { FEED_HUB_URL, FEED_SIM_STATS_URL, FEED_SIM_URL, FEED_URL } from "./config/api";
 
 const MAX_ITEMS = 100;
-const SIM_SYMBOLS = ["AAPL", "TSLA", "NVDA", "AMD", "META", "PLTR"] as const;
+const SIGNAL_EXPIRY_SECONDS = 75;
+const SCORE_DECAY_START_SECONDS = 30;
+const MAX_SCORE_DECAY = 0.55;
 
-function pickRandom<T>(items: readonly T[]): T {
-  return items[Math.floor(Math.random() * items.length)];
+interface SimulationStats {
+  engineSignalsPerMinute: number;
+  fallbackSignalsPerMinute: number;
+  totalSignalsPerMinute: number;
+  fallbackRatePercent: number;
 }
 
-function randomInRange(min: number, max: number): number {
-  return min + Math.random() * (max - min);
+const SIM_SYMBOLS = ["NVDA", "TSLA", "AMD", "PLTR", "AAPL", "META", "SMCI", "IONQ", "RGTI", "AGH"];
+const SIM_HEADLINES = [
+  "Announces strategic capital update amid strong demand",
+  "Receives analyst rating revision after guidance update",
+  "Wins new enterprise contract and expands pipeline",
+  "Shares active as traders react to overnight commentary",
+  "Extends premarket move on heavy order-flow activity",
+];
+const SIM_SOURCES = ["Reuters", "Bloomberg", "CNBC", "Benzinga", "The Fly"];
+const SIM_FLAGS = ["HIGH_CTB", "REG_SHO", "R_S", "HALT", "OFFERING", "FDA"];
+
+function randomRange(min: number, max: number): number {
+  return min + (Math.random() * (max - min));
+}
+
+function pickOne<T>(values: T[]): T {
+  return values[Math.floor(Math.random() * values.length)];
 }
 
 function normalizeSignalType(value: unknown): FeedItem["signalType"] {
   const input = typeof value === "string" ? value.toUpperCase() : "NEWS";
-  if (input === "SPIKE" || input === "BULLISH" || input === "BEARISH" || input === "NEWS") {
+  if (
+    input === "SPIKE" ||
+    input === "BULLISH" ||
+    input === "BEARISH" ||
+    input === "NEWS" ||
+    input === "TRENDING" ||
+    input === "TOP_OPPORTUNITY"
+  ) {
     return input;
   }
 
@@ -32,17 +60,55 @@ function normalizeFeedItem(raw: unknown): FeedItem | null {
 
   const candidate = raw as Record<string, unknown>;
   const symbol = typeof candidate.symbol === "string" ? candidate.symbol.trim().toUpperCase() : "";
+  const countryCode = typeof candidate.countryCode === "string" ? candidate.countryCode.trim().toUpperCase() : "US";
   const headline = typeof candidate.headline === "string" ? candidate.headline.trim() : "";
   const id = typeof candidate.id === "string" && candidate.id ? candidate.id : crypto.randomUUID();
   const timestamp = typeof candidate.timestamp === "string" ? candidate.timestamp : new Date().toISOString();
   const source = typeof candidate.source === "string" ? candidate.source : "Scanner";
+  const url = typeof candidate.url === "string" ? candidate.url.trim() : "";
+  const reason = typeof candidate.reason === "string" ? candidate.reason : "";
   const price = Number(candidate.price);
+  const priceRange = typeof candidate.priceRange === "string" ? candidate.priceRange.trim() : "";
+  const floatShares = Number(candidate.floatShares);
+  const institutionalOwnership = Number(candidate.institutionalOwnership);
+  const marketCap = Number(candidate.marketCap);
+  const volume = Number(candidate.volume);
+  const flagsInput = Array.isArray(candidate.flags)
+    ? candidate.flags
+    : Array.isArray(candidate.specialFlags)
+      ? candidate.specialFlags
+      : [];
+  const flags = flagsInput
+      .filter((flag): flag is string => typeof flag === "string" && flag.trim().length > 0)
+      .map((flag) => flag.trim().toUpperCase());
   const changePercent = Number(candidate.changePercent);
   const activityScore = Number(candidate.activityScore);
   const score = Number(candidate.score);
+  const volumeRatio = Number(candidate.volumeRatio);
+  const momentum = Number(candidate.momentum);
+  const acceleration = Number(candidate.acceleration);
+  const gapPercent = Number(candidate.gapPercent);
+  const repeatCount = Number(candidate.repeatCount);
+  const momentumDetectedAt = typeof candidate.momentumDetectedAt === "string"
+    ? candidate.momentumDetectedAt
+    : undefined;
   const confidence = typeof candidate.confidence === "string"
     ? candidate.confidence.toUpperCase()
     : "LOW";
+  const sentimentRaw = typeof candidate.sentiment === "string"
+    ? candidate.sentiment
+    : typeof candidate.sentimentLabel === "string"
+      ? candidate.sentimentLabel
+      : "NEUTRAL";
+  const sentiment = sentimentRaw.toUpperCase();
+  const newsCategory = typeof candidate.newsCategory === "string"
+    ? candidate.newsCategory.trim()
+    : typeof candidate.category === "string"
+      ? candidate.category.trim()
+      : "";
+  const tradeReadiness = typeof candidate.tradeReadiness === "string"
+    ? candidate.tradeReadiness.toUpperCase()
+    : "WATCH";
   const isTopOpportunity = candidate.isTopOpportunity === true;
   const isTrending = candidate.isTrending === true;
 
@@ -53,17 +119,106 @@ function normalizeFeedItem(raw: unknown): FeedItem | null {
   return {
     id,
     symbol,
+    countryCode: countryCode || "US",
     price,
+    priceRange: priceRange || getPriceRange(price),
     changePercent,
     signalType: normalizeSignalType(candidate.signalType),
     activityScore,
     score: Number.isNaN(score) ? activityScore : score,
     confidence: confidence === "HIGH" || confidence === "MEDIUM" || confidence === "LOW" ? confidence : "LOW",
+    tradeReadiness: tradeReadiness === "READY" || tradeReadiness === "WATCH" ? tradeReadiness : "WATCH",
     isTopOpportunity,
     isTrending,
     headline,
+    url,
+    reason,
+    floatShares: Number.isNaN(floatShares) ? undefined : floatShares,
+    institutionalOwnership: Number.isNaN(institutionalOwnership) ? undefined : institutionalOwnership,
+    marketCap: Number.isNaN(marketCap) ? undefined : marketCap,
+    volume: Number.isNaN(volume) ? undefined : volume,
+    flags: flags.length > 0 ? [...new Set(flags)] : undefined,
+    volumeRatio: Number.isNaN(volumeRatio) ? undefined : volumeRatio,
+    momentum: Number.isNaN(momentum) ? undefined : momentum,
+    sentiment: sentiment === "BULLISH" || sentiment === "BEARISH" || sentiment === "NEUTRAL" ? sentiment : "NEUTRAL",
+    sentimentLabel: sentiment === "BULLISH" || sentiment === "BEARISH" ? sentiment : undefined,
+    acceleration: Number.isNaN(acceleration) ? undefined : acceleration,
+    gapPercent: Number.isNaN(gapPercent) ? undefined : gapPercent,
+    newsCategory: newsCategory || undefined,
+    category: newsCategory || undefined,
+    repeatCount: Number.isNaN(repeatCount) ? undefined : repeatCount,
+    specialFlags: flags.length > 0 ? [...new Set(flags)] : undefined,
+    momentumDetectedAt,
     timestamp,
     source,
+  };
+}
+
+function createLocalSimItem(forceStrong: boolean, existingItems: FeedItem[]): FeedItem {
+  const preferred = existingItems.slice(0, 6).map((item) => item.symbol);
+  const symbolPool = [...new Set([...preferred, ...SIM_SYMBOLS])];
+  const symbol = pickOne(symbolPool);
+  const isNewsHeavy = Math.random() < 0.25;
+  const direction = Math.random() < 0.55 ? 1 : -1;
+  const changePercent = forceStrong
+    ? Number((randomRange(3.1, 6.3) * direction).toFixed(2))
+    : Number((randomRange(0.4, 2.9) * direction).toFixed(2));
+  const score = forceStrong
+    ? Number(randomRange(96, 128).toFixed(2))
+    : Number(randomRange(56, 92).toFixed(2));
+  const signalType: FeedItem["signalType"] = forceStrong
+    ? "SPIKE"
+    : isNewsHeavy
+      ? "NEWS"
+      : changePercent >= 0
+        ? "BULLISH"
+        : "BEARISH";
+  const timestamp = new Date().toISOString();
+  const momentumDetectedAt = new Date(Date.now() - Math.floor(randomRange(2_000, 16_000))).toISOString();
+  const volume = Math.round(randomRange(80_000, 2_800_000));
+  const volumeRatio = Number(randomRange(1.1, forceStrong ? 4.2 : 2.6).toFixed(2));
+  const sentiment: FeedItem["sentiment"] = changePercent >= 0 ? "BULLISH" : "BEARISH";
+  const selectedFlags = Math.random() < 0.3 ? [pickOne(SIM_FLAGS)] : [];
+  const selectedCategory = isNewsHeavy ? pickOne(["earnings", "analyst", "contract", "fda", "legal"]) : undefined;
+  const price = Number(randomRange(1.2, 280).toFixed(2));
+
+  return {
+    id: crypto.randomUUID(),
+    symbol,
+    countryCode: "US",
+    price,
+    priceRange: getPriceRange(price),
+    changePercent,
+    signalType,
+    activityScore: score,
+    score,
+    confidence: score > 100 ? "HIGH" : score > 70 ? "MEDIUM" : "LOW",
+    tradeReadiness: score > 100 && volumeRatio > 2 ? "READY" : "WATCH",
+    isTopOpportunity: forceStrong && Math.random() < 0.4,
+    isTrending: Math.random() < 0.3,
+    headline: `${symbol} ${pickOne(SIM_HEADLINES)}`,
+    url: `https://example.com/news/${symbol.toLowerCase()}-${Date.now()}`,
+    reason: forceStrong
+      ? "Momentum breakout + unusual volume + confirming news"
+      : "Simulated open-market rotational activity",
+    floatShares: Number(randomRange(4, 85).toFixed(2)),
+    institutionalOwnership: Number(randomRange(4, 92).toFixed(2)),
+    marketCap: Number(randomRange(300, 220_000).toFixed(2)),
+    volume,
+    flags: selectedFlags,
+    volumeRatio,
+    momentum: changePercent,
+    sentiment,
+    sentimentLabel: sentiment,
+    acceleration: Number((changePercent * randomRange(0.25, 0.85)).toFixed(2)),
+    gapPercent: Number((changePercent * randomRange(0.1, 0.6)).toFixed(2)),
+    newsCategory: selectedCategory,
+    category: selectedCategory,
+    repeatCount: Math.floor(randomRange(1, 5)),
+    specialFlags: selectedFlags,
+    momentumDetectedAt,
+    timestamp,
+    source: pickOne(SIM_SOURCES),
   };
 }
 
@@ -72,49 +227,28 @@ function mergeNewItem(items: FeedItem[], item: FeedItem): FeedItem[] {
   return next.slice(0, MAX_ITEMS);
 }
 
-function generateFakeSignal(): FeedItem {
-  const now = new Date().toISOString();
-  const roll = Math.random();
-
-  let score = randomInRange(40, 79.9);
-  let signalType: FeedItem["signalType"] = pickRandom(["BULLISH", "BEARISH"]);
-  let confidence: FeedItem["confidence"] = "LOW";
-  let isTopOpportunity = false;
-
-  if (roll < 0.1) {
-    score = randomInRange(101, 120);
-    signalType = "SPIKE";
-    confidence = "HIGH";
-    isTopOpportunity = Math.random() < 0.5;
-  } else if (roll < 0.4) {
-    score = randomInRange(80, 100);
-    signalType = pickRandom(["SPIKE", "BULLISH", "BEARISH"]);
-    confidence = "MEDIUM";
+function getAgeSeconds(item: FeedItem, nowMs: number): number {
+  const timestampMs = Date.parse(item.timestamp);
+  if (Number.isNaN(timestampMs)) {
+    return 0;
   }
 
-  const changePercent = randomInRange(-5, 5);
-  const resolvedSignal =
-    signalType === "SPIKE"
-      ? "SPIKE"
-      : changePercent >= 0
-        ? "BULLISH"
-        : "BEARISH";
+  return Math.max(0, Math.floor((nowMs - timestampMs) / 1000));
+}
 
-  return {
-    id: crypto.randomUUID(),
-    symbol: pickRandom(SIM_SYMBOLS),
-    price: Number(randomInRange(100, 900).toFixed(2)),
-    changePercent: Number(changePercent.toFixed(2)),
-    signalType: resolvedSignal,
-    activityScore: Number(score.toFixed(2)),
-    score: Number(score.toFixed(2)),
-    confidence,
-    isTopOpportunity,
-    isTrending: Math.random() < 0.2,
-    headline: "Simulated market movement",
-    timestamp: now,
-    source: "SIM",
-  };
+function getDecayedScore(item: FeedItem, nowMs: number): number {
+  const baseScore = item.score ?? item.activityScore;
+  const ageSeconds = getAgeSeconds(item, nowMs);
+  if (ageSeconds <= SCORE_DECAY_START_SECONDS) {
+    return baseScore;
+  }
+
+  const decayProgress = Math.min(
+    1,
+    (ageSeconds - SCORE_DECAY_START_SECONDS) / Math.max(1, SIGNAL_EXPIRY_SECONDS - SCORE_DECAY_START_SECONDS),
+  );
+  const factor = 1 - (MAX_SCORE_DECAY * decayProgress);
+  return Number((baseScore * factor).toFixed(2));
 }
 
 function playFallbackAlertTone() {
@@ -155,16 +289,23 @@ function App() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [simulationMode, setSimulationMode] = useState(false);
   const connectionRef = useRef<HubConnection | null>(null);
+  const itemsRef = useRef<FeedItem[]>([]);
   const feedContainerRef = useRef<HTMLDivElement | null>(null);
   const alertAudioRef = useRef<HTMLAudioElement | null>(null);
   const lastSoundTimeRef = useRef(0);
   const hasUserInteractedRef = useRef(false);
   const soundEnabledRef = useRef(soundEnabled);
+  const simLastStrongAtRef = useRef(0);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [simulationStats, setSimulationStats] = useState<SimulationStats | null>(null);
 
   useEffect(() => {
     soundEnabledRef.current = soundEnabled;
   }, [soundEnabled]);
+
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
 
   useEffect(() => {
     const markInteracted = () => {
@@ -363,15 +504,118 @@ function App() {
 
   useEffect(() => {
     if (!simulationMode) {
+      setSimulationStats(null);
+      return;
+    }
+    let cancelled = false;
+    let inFlight = false;
+
+    const pullSimulationBatch = async () => {
+      if (cancelled || inFlight) {
+        return;
+      }
+
+      inFlight = true;
+      try {
+        const response = await fetch(FEED_SIM_URL, {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          throw new Error(`Simulation API returned ${response.status}`);
+        }
+
+        const payload = (await response.json()) as unknown;
+        const normalized = Array.isArray(payload)
+          ? payload.map(normalizeFeedItem).filter(Boolean) as FeedItem[]
+          : [];
+        if (!cancelled) {
+          const now = Date.now();
+          const forceStrong = now - simLastStrongAtRef.current > randomRange(10_000, 15_000);
+          if (forceStrong) {
+            simLastStrongAtRef.current = now;
+          }
+
+          const incoming = [...normalized];
+          const minVisible = 2;
+          while (incoming.length < minVisible) {
+            incoming.push(createLocalSimItem(forceStrong && incoming.length === 0, itemsRef.current));
+          }
+
+          for (const item of incoming) {
+            pushIncomingSignal(item);
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setStatus("degraded");
+          const now = Date.now();
+          const forceStrong = now - simLastStrongAtRef.current > randomRange(10_000, 15_000);
+          if (forceStrong) {
+            simLastStrongAtRef.current = now;
+          }
+
+          const fallbackCount = Math.floor(randomRange(2, 4.99));
+          for (let index = 0; index < fallbackCount; index += 1) {
+            pushIncomingSignal(createLocalSimItem(forceStrong && index === 0, itemsRef.current));
+          }
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void pullSimulationBatch();
+    const interval = window.setInterval(() => {
+      void pullSimulationBatch();
+    }, 1200);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [simulationMode]);
+
+  useEffect(() => {
+    if (!simulationMode) {
       return;
     }
 
+    let cancelled = false;
+    const pullStats = async () => {
+      try {
+        const response = await fetch(FEED_SIM_STATS_URL, {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(`Simulation stats API returned ${response.status}`);
+        }
+
+        const payload = await response.json() as Partial<SimulationStats>;
+        if (!cancelled) {
+          setSimulationStats({
+            engineSignalsPerMinute: Number(payload.engineSignalsPerMinute ?? 0),
+            fallbackSignalsPerMinute: Number(payload.fallbackSignalsPerMinute ?? 0),
+            totalSignalsPerMinute: Number(payload.totalSignalsPerMinute ?? 0),
+            fallbackRatePercent: Number(payload.fallbackRatePercent ?? 0),
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setSimulationStats(null);
+        }
+      }
+    };
+
+    void pullStats();
     const interval = window.setInterval(() => {
-      const fake = generateFakeSignal();
-      pushIncomingSignal(fake);
-    }, 1500);
+      void pullStats();
+    }, 3000);
 
     return () => {
+      cancelled = true;
       window.clearInterval(interval);
     };
   }, [simulationMode]);
@@ -390,9 +634,10 @@ function App() {
   }, [items, autoScroll]);
 
   const filtered = useMemo(() => {
+    const fresh = items.filter((item) => getAgeSeconds(item, nowMs) < SIGNAL_EXPIRY_SECONDS);
     const scoped = filter === "ALL"
-      ? items
-      : items.filter((item) => item.signalType === filter);
+      ? fresh
+      : fresh.filter((item) => item.signalType === filter);
 
     return [...scoped].sort((a, b) => {
       if (a.isTopOpportunity && !b.isTopOpportunity) {
@@ -403,15 +648,15 @@ function App() {
         return 1;
       }
 
-      const aScore = a.score ?? a.activityScore;
-      const bScore = b.score ?? b.activityScore;
+      const aScore = getDecayedScore(a, nowMs);
+      const bScore = getDecayedScore(b, nowMs);
       if (bScore !== aScore) {
         return bScore - aScore;
       }
 
       return Date.parse(b.timestamp) - Date.parse(a.timestamp);
     });
-  }, [items, filter]);
+  }, [items, filter, nowMs]);
 
   return (
     <main className="h-screen bg-[#0B0F14] text-white">
@@ -426,6 +671,9 @@ function App() {
           onSoundEnabledChange={setSoundEnabled}
           onSimulationModeChange={setSimulationMode}
           status={status}
+          simulationStatsLabel={simulationStats
+            ? `SIM ENG ${simulationStats.engineSignalsPerMinute}/m | FB ${simulationStats.fallbackSignalsPerMinute}/m | ${simulationStats.fallbackRatePercent.toFixed(0)}%`
+            : undefined}
         />
         {simulationMode ? (
           <div className="border-b border-amber-600/40 bg-amber-500/10 px-4 py-2 text-xs font-semibold tracking-wide text-amber-200">

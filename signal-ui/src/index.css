@@ -14,11 +14,25 @@ body,
 }
 
 body {
-  font-family: "JetBrains Mono", "Consolas", "Menlo", monospace;
+  font-family:
+    system-ui,
+    "Segoe UI Symbol",
+    "Segoe UI Emoji",
+    "Apple Color Emoji",
+    "Noto Color Emoji",
+    sans-serif;
 }
 
 .animate-feed-in {
   animation: feedIn 380ms ease-out;
+}
+
+.animate-flash {
+  animation: flash 0.6s ease-out;
+}
+
+.animate-pulse-soft {
+  animation: pulseSoft 1.5s ease-in-out infinite;
 }
 
 .feed-strong-signal {
@@ -34,6 +48,11 @@ body {
 
 .feed-strength-strong {
   filter: saturate(1.1) brightness(1.08);
+}
+
+.feed-ultra-strong {
+  color: rgb(253 230 138);
+  text-shadow: 0 0 8px rgba(253, 224, 71, 0.25);
 }
 
 .feed-strength-medium {
@@ -63,5 +82,29 @@ body {
     opacity: 1;
     transform: translateY(0);
     background-color: transparent;
+  }
+}
+
+@keyframes flash {
+  0% {
+    background-color: rgba(255, 255, 0, 0.15);
+  }
+
+  100% {
+    background-color: transparent;
+  }
+}
+
+@keyframes pulseSoft {
+  0% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.85;
+  }
+
+  100% {
+    opacity: 1;
   }
 }

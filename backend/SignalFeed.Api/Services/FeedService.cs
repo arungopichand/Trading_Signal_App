@@ -7,6 +7,9 @@ namespace SignalFeed.Api.Services;
 public sealed class FeedService
 {
     private const int MaxItems = 100;
+    private static readonly TimeSpan ExpireWindow = TimeSpan.FromSeconds(75);
+    private static readonly TimeSpan ScoreDecayStart = TimeSpan.FromSeconds(30);
+    private const decimal MaxScoreDecay = 0.55m;
     private static readonly TimeSpan SymbolReemitWindow = TimeSpan.FromSeconds(30);
     private const decimal SymbolScoreJumpThreshold = 25m;
     private static readonly TimeSpan EmitSpacing = TimeSpan.FromMilliseconds(650);
@@ -32,9 +35,11 @@ public sealed class FeedService
     {
         lock (_gate)
         {
+            var now = DateTimeOffset.UtcNow;
+            PruneExpiredItems(now);
             return _items
                 .OrderByDescending(item => item.IsTopOpportunity)
-                .ThenByDescending(item => item.Score > 0 ? item.Score : item.ActivityScore)
+                .ThenByDescending(item => GetDecayedScore(item, now))
                 .ThenByDescending(item => item.Timestamp)
                 .Take(MaxItems)
                 .ToList();
@@ -58,10 +63,12 @@ public sealed class FeedService
     {
         lock (_gate)
         {
+            var now = DateTimeOffset.UtcNow;
+            PruneExpiredItems(now);
             return _items
                 .Where(item => !string.IsNullOrWhiteSpace(item.Symbol))
                 .OrderByDescending(item => item.IsTopOpportunity)
-                .ThenByDescending(item => item.Score > 0 ? item.Score : item.ActivityScore)
+                .ThenByDescending(item => GetDecayedScore(item, now))
                 .ThenByDescending(item => item.Timestamp)
                 .Select(item => item.Symbol)
                 .Distinct(StringComparer.Ordinal)
@@ -75,16 +82,36 @@ public sealed class FeedService
         var feedItem = new FeedItem
         {
             Symbol = signal.Symbol,
+            CountryCode = string.IsNullOrWhiteSpace(signal.CountryCode) ? "US" : signal.CountryCode.Trim().ToUpperInvariant(),
             Price = signal.Price,
+            PriceRange = string.IsNullOrWhiteSpace(signal.PriceRange)
+                ? PriceRangeResolver.GetPriceRange(signal.Price)
+                : signal.PriceRange,
             ChangePercent = signal.ChangePercent,
             SignalType = signal.SignalType,
             Score = signal.Score > 0 ? signal.Score : signal.ActivityScore,
             ActivityScore = signal.ActivityScore,
             Confidence = signal.Confidence,
+            TradeReadiness = string.IsNullOrWhiteSpace(signal.TradeReadiness) ? "WATCH" : signal.TradeReadiness,
             IsTopOpportunity = signal.IsTopOpportunity,
             IsTrending = signal.IsTrending,
             Headline = signal.Headline,
+            Url = signal.Url,
+            Reason = signal.SignalReason,
+            FloatShares = signal.FloatShares,
+            InstitutionalOwnership = signal.InstitutionalOwnership,
+            MarketCap = signal.MarketCap,
+            Volume = signal.Volume,
+            Flags = signal.Flags ?? [],
+            VolumeRatio = signal.VolumeRatio,
+            Momentum = signal.Momentum,
+            Sentiment = NormalizeSentiment(signal.Sentiment),
+            Acceleration = signal.Acceleration,
+            GapPercent = signal.GapPercent,
+            NewsCategory = signal.NewsCategory,
+            RepeatCount = Math.Max(0, signal.RepeatCount),
             Timestamp = signal.Timestamp == default ? signal.ScannedAt : signal.Timestamp,
+            MomentumDetectedAt = signal.MomentumDetectedAt,
             Source = string.IsNullOrWhiteSpace(signal.Source) ? "Scanner" : signal.Source
         };
 
@@ -93,7 +120,12 @@ public sealed class FeedService
 
     public Task AddNewsAsync(NormalizedNewsItem news, CancellationToken cancellationToken = default)
     {
-        var type = news.SentimentScore > 0.2m ? "BULLISH" : news.SentimentScore < -0.2m ? "BEARISH" : "NEWS";
+        var type = news.Sentiment switch
+        {
+            "BULLISH" => "BULLISH",
+            "BEARISH" => "BEARISH",
+            _ => "NEWS"
+        };
         var score = Math.Round(Math.Abs(news.SentimentScore) * 100m, 2);
         if (score < 70m)
         {
@@ -103,14 +135,27 @@ public sealed class FeedService
         var feedItem = new FeedItem
         {
             Symbol = news.Symbol,
+            CountryCode = "US",
             SignalType = type,
             Score = score,
             ActivityScore = score,
             Confidence = NormalizeConfidence(string.Empty, score),
+            TradeReadiness = "WATCH",
             IsTopOpportunity = false,
             IsTrending = false,
             Headline = news.Headline,
+            Url = news.Url,
+            Reason = $"News sentiment: {news.Sentiment} + Category: {news.Category} + Score {score:0.##}",
+            FloatShares = null,
+            InstitutionalOwnership = null,
+            MarketCap = null,
+            Volume = null,
+            Flags = [],
+            Sentiment = NormalizeSentiment(news.Sentiment),
+            NewsCategory = news.Category,
+            RepeatCount = 1,
             Timestamp = news.Datetime == default ? DateTimeOffset.UtcNow : news.Datetime,
+            MomentumDetectedAt = null,
             Source = string.IsNullOrWhiteSpace(news.Source) ? "NEWS" : news.Source
         };
 
@@ -125,8 +170,22 @@ public sealed class FeedService
         }
 
         item.SignalType = NormalizeSignalType(item.SignalType);
+        item.CountryCode = NormalizeCountryCode(item.CountryCode);
+        item.Url = NormalizeUrl(item.Url);
         item.Score = item.Score > 0 ? item.Score : item.ActivityScore;
+        item.PriceRange = string.IsNullOrWhiteSpace(item.PriceRange)
+            ? PriceRangeResolver.GetPriceRange(item.Price)
+            : item.PriceRange.Trim();
+        item.Flags = item.Flags
+            .Where(flag => !string.IsNullOrWhiteSpace(flag))
+            .Select(flag => flag.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
         item.Confidence = NormalizeConfidence(item.Confidence, item.Score);
+        item.TradeReadiness = NormalizeTradeReadiness(item.TradeReadiness);
+        item.Sentiment = NormalizeSentiment(item.Sentiment);
+        item.NewsCategory = NormalizeNewsCategory(item.NewsCategory);
+        item.RepeatCount = Math.Max(0, item.RepeatCount);
         var fingerprint = BuildFingerprint(item);
         var wasInserted = false;
         var totalItems = 0;
@@ -134,6 +193,8 @@ public sealed class FeedService
 
         lock (_gate)
         {
+            PruneExpiredItems(DateTimeOffset.UtcNow);
+
             if (_lastEmittedBySymbol.TryGetValue(item.Symbol, out var lastEmission))
             {
                 var withinQuietWindow = item.Timestamp - lastEmission.EmittedAt < SymbolReemitWindow;
@@ -229,7 +290,7 @@ public sealed class FeedService
         var normalized = signalType?.Trim().ToUpperInvariant() ?? "NEWS";
         return normalized switch
         {
-            "SPIKE" or "BULLISH" or "BEARISH" or "NEWS" => normalized,
+            "SPIKE" or "BULLISH" or "BEARISH" or "NEWS" or "TRENDING" or "TOP_OPPORTUNITY" => normalized,
             _ => "NEWS"
         };
     }
@@ -253,6 +314,46 @@ public sealed class FeedService
         return score > 70m ? "MEDIUM" : "LOW";
     }
 
+    private static string NormalizeTradeReadiness(string tradeReadiness)
+    {
+        var normalized = tradeReadiness?.Trim().ToUpperInvariant();
+        return normalized == "READY" ? "READY" : "WATCH";
+    }
+
+    private static string NormalizeCountryCode(string countryCode)
+    {
+        var normalized = countryCode?.Trim().ToUpperInvariant();
+        return string.IsNullOrWhiteSpace(normalized) ? "US" : normalized;
+    }
+
+    private static string NormalizeUrl(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return string.Empty;
+        }
+
+        return url.Trim();
+    }
+
+    private static string NormalizeSentiment(string sentiment)
+    {
+        var normalized = sentiment?.Trim().ToUpperInvariant();
+        return normalized switch
+        {
+            "BULLISH" => "BULLISH",
+            "BEARISH" => "BEARISH",
+            _ => "NEUTRAL"
+        };
+    }
+
+    private static string NormalizeNewsCategory(string category)
+    {
+        return string.IsNullOrWhiteSpace(category)
+            ? string.Empty
+            : category.Trim();
+    }
+
     private bool UpdateTrending(string symbol, DateTimeOffset timestamp)
     {
         if (!_emissionHistoryBySymbol.TryGetValue(symbol, out var history))
@@ -269,5 +370,25 @@ public sealed class FeedService
         }
 
         return history.Count >= TrendingThreshold;
+    }
+
+    private void PruneExpiredItems(DateTimeOffset now)
+    {
+        _items.RemoveAll(item => now - item.Timestamp > ExpireWindow);
+    }
+
+    private static decimal GetDecayedScore(FeedItem item, DateTimeOffset now)
+    {
+        var baseScore = item.Score > 0 ? item.Score : item.ActivityScore;
+        var age = now - item.Timestamp;
+        if (age <= ScoreDecayStart)
+        {
+            return baseScore;
+        }
+
+        var decayProgress = (age - ScoreDecayStart).TotalSeconds / Math.Max(1d, (ExpireWindow - ScoreDecayStart).TotalSeconds);
+        var bounded = Math.Clamp((decimal)decayProgress, 0m, 1m);
+        var decayFactor = 1m - (MaxScoreDecay * bounded);
+        return Math.Round(baseScore * decayFactor, 2);
     }
 }

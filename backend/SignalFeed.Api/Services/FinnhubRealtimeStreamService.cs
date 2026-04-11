@@ -151,16 +151,39 @@ public sealed class FinnhubRealtimeStreamService : BackgroundService
             _lastTradeBySymbol[symbol] = trade.Price;
             var change = prior == 0 ? 0 : ((trade.Price - prior) / prior) * 100m;
             var volume = trade.Volume;
+            if (Math.Abs(change) < 0.5m && volume < 2_000m)
+            {
+                continue;
+            }
 
-            var type = change > 0 ? "SPIKE" : change < 0 ? "BEARISH" : "NEWS";
+            var type = change >= 2m ? "SPIKE" : change > 0 ? "BULLISH" : "BEARISH";
+            var score = Math.Round(Math.Abs(change) * 15m + Math.Min(40m, volume / 500m), 2);
+            if (score < 60m)
+            {
+                continue;
+            }
+
             var item = new FeedItem
             {
                 Symbol = symbol,
+                CountryCode = "US",
                 Price = Math.Round(trade.Price, 4),
                 ChangePercent = Math.Round(change, 2),
                 SignalType = type,
-                ActivityScore = Math.Round(Math.Abs(change) + Math.Min(6m, volume / 10000m), 2),
+                Score = score,
+                ActivityScore = score,
+                Confidence = score > 100m ? "HIGH" : score > 70m ? "MEDIUM" : "LOW",
+                TradeReadiness = "WATCH",
+                VolumeRatio = null,
+                Momentum = Math.Round(change, 2),
+                Sentiment = "NEUTRAL",
+                Acceleration = null,
+                GapPercent = null,
+                NewsCategory = string.Empty,
+                RepeatCount = 1,
+                MomentumDetectedAt = DateTimeOffset.UtcNow,
                 Headline = $"Tape move {change:+0.##;-0.##;0}% on {volume:0} shares.",
+                Reason = $"Realtime tape momentum + volume burst ({volume:0} shares)",
                 Timestamp = DateTimeOffset.UtcNow,
                 Source = "TAPE"
             };
