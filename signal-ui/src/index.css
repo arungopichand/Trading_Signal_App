@@ -35,6 +35,17 @@ body {
   animation: pulseSoft 1.5s ease-in-out infinite;
 }
 
+.animate-top-opportunity-in {
+  animation: topOpportunityIn 260ms ease-out;
+}
+
+.top-opportunity-headline {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .feed-strong-signal {
   border-left: 2px solid rgba(251, 191, 36, 0.95);
   box-shadow: inset 0 0 0 1px rgba(251, 191, 36, 0.3), 0 0 14px rgba(251, 191, 36, 0.2);
@@ -106,5 +117,17 @@ body {
 
   100% {
     opacity: 1;
+  }
+}
+
+@keyframes topOpportunityIn {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }

@@ -15,6 +15,7 @@ export interface FeedItem {
   headline: string;
   url?: string;
   reason?: string;
+  reasons?: string[];
   floatShares?: number;
   institutionalOwnership?: number;
   marketCap?: number;
