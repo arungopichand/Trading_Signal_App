@@ -35,6 +35,36 @@ builder.Services.AddHttpClient<FinnhubService>(client =>
     UseProxy = false
 });
 
+builder.Services.AddHttpClient<PolygonService>(client =>
+{
+    client.BaseAddress = new Uri("https://api.polygon.io/");
+    client.Timeout = TimeSpan.FromSeconds(15);
+})
+.ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+{
+    UseProxy = false
+});
+
+builder.Services.AddHttpClient<ExternalNewsApiService>(client =>
+{
+    client.BaseAddress = new Uri("https://newsapi.org/");
+    client.Timeout = TimeSpan.FromSeconds(15);
+})
+.ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+{
+    UseProxy = false
+});
+
+builder.Services.AddHttpClient<FmpService>(client =>
+{
+    client.BaseAddress = new Uri("https://financialmodelingprep.com/");
+    client.Timeout = TimeSpan.FromSeconds(15);
+})
+.ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+{
+    UseProxy = false
+});
+
 builder.Services.AddHttpClient<SupabaseDataService>(client =>
 {
     client.Timeout = TimeSpan.FromSeconds(15);
@@ -42,6 +72,9 @@ builder.Services.AddHttpClient<SupabaseDataService>(client =>
 
 builder.Services.AddSingleton<SymbolUniverseService>();
 builder.Services.AddSingleton<NewsService>();
+builder.Services.AddSingleton<NewsAggregationService>();
+builder.Services.AddScoped<IMarketDataService, MarketDataService>();
+builder.Services.AddSingleton<MarketDataService>();
 builder.Services.AddSingleton<FeedService>();
 builder.Services.AddSingleton<SignalEngine>();
 builder.Services.AddSingleton<SimulationSignalService>();
@@ -64,11 +97,19 @@ builder.Services.AddCors(options =>
 var app = builder.Build();
 Console.WriteLine("DEPLOY VERSION: " + DateTime.UtcNow);
 
-var finnhubApiKey = builder.Configuration["FINNHUB:APIKEY"] ?? Environment.GetEnvironmentVariable("FINNHUB__APIKEY");
-if (string.IsNullOrWhiteSpace(finnhubApiKey))
+static void WarnIfMissingKey(IConfiguration config, string envName, string sectionPath)
 {
-    Console.WriteLine("ERROR: FINNHUB KEY MISSING");
+    var value = Environment.GetEnvironmentVariable(envName) ?? config[envName] ?? config[sectionPath];
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        Console.WriteLine($"WARN: {envName} missing. Service will continue with available sources.");
+    }
 }
+
+WarnIfMissingKey(builder.Configuration, "FINNHUB__APIKEY", "Finnhub:ApiKey");
+WarnIfMissingKey(builder.Configuration, "POLYGON__APIKEY", "Polygon:ApiKey");
+WarnIfMissingKey(builder.Configuration, "NEWSAPI__APIKEY", "NewsApi:ApiKey");
+WarnIfMissingKey(builder.Configuration, "FMP__APIKEY", "Fmp:ApiKey");
 
 app.UseCors("AllowFrontend");
 app.MapGet("/", () => Results.Ok(new

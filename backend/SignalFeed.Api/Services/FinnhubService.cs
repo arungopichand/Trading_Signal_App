@@ -23,6 +23,7 @@ public class FinnhubService
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _config;
     private readonly ILogger<FinnhubService> _logger;
+    private int _missingKeyWarningLogged;
 
     public FinnhubService(
         HttpClient httpClient,
@@ -459,7 +460,11 @@ public class FinnhubService
 
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            _logger.LogError("Finnhub API key is not configured.");
+            if (Interlocked.Exchange(ref _missingKeyWarningLogged, 1) == 0)
+            {
+                _logger.LogWarning("FINNHUB__APIKEY missing. Continuing with available data sources.");
+            }
+
             return false;
         }
 
