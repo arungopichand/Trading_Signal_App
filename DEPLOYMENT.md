@@ -29,6 +29,14 @@ Workflow file: `.github/workflows/deploy.yml`
 - Triggers on push to `main` and `dev`
 - Builds frontend (`signal-ui`)
 - Builds backend (`backend/SignalFeed.Api`)
+- On `main` pushes:
+  - Deploys frontend to Vercel (if `VERCEL_TOKEN` is set)
+  - Triggers Render deploy hook (if `RENDER_DEPLOY_HOOK_URL` is set)
+
+Required GitHub repository secrets:
+
+- `VERCEL_TOKEN`
+- `RENDER_DEPLOY_HOOK_URL`
 
 ## Vercel (Frontend)
 
@@ -39,6 +47,7 @@ Project configuration:
 3. Framework preset: `Vite`.
 4. Production branch: `main`.
 5. Preview branch flow: `dev` pushes generate preview deployments.
+6. Keep Vercel Git integration connected (for native previews) even though `main` is also deployed by GitHub Actions.
 
 Environment variables (Production + Preview):
 
