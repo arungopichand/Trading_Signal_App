@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: trading-backend
+    runtime: docker
+    plan: free
+    region: ohio
+    dockerfilePath: ./backend/SignalFeed.Api/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    autoDeployTrigger: off
+    buildFilter:
+      paths:
+        - backend/**
+        - render.yaml
+        - .github/workflows/deploy.yml
+    envVars:
+      - key: FINNHUB__APIKEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false

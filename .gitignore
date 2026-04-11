@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.vercel/
+.env
+.env.*
+!.env.example
+
+bin/
+obj/
+
+*.log
+*.out.log
+*.err.log
+
+.DS_Store
+Thumbs.db
+.vscode/
