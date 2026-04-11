@@ -6,6 +6,7 @@
 - Backend: `https://trading-signal-api-ozlf.onrender.com`
 - Backend health: `https://trading-signal-api-ozlf.onrender.com/health`
 - Backend signals: `https://trading-signal-api-ozlf.onrender.com/api/signals/current`
+- Last verified deployment wiring: April 11, 2026
 
 ## Repository Layout
 
