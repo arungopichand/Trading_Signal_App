@@ -22,8 +22,6 @@
 3. Push the `main` branch.
 4. Add these repository secrets:
    - `VERCEL_TOKEN`
-   - `VERCEL_ORG_ID=team_Vv199lkQ4BbWWcuFKZK8dmgP`
-   - `VERCEL_PROJECT_ID=prj_OzAn5Y6gqphOglZrZyGMmdK1yNKl`
 
 ## Render
 
@@ -41,9 +39,9 @@
 
 1. Vercel project is live as `trading-signal-ui`.
 2. The production frontend URL is `https://trading-signal-ui.vercel.app`.
-3. The project uses:
-   - `VERCEL_ORG_ID=team_Vv199lkQ4BbWWcuFKZK8dmgP`
-   - `VERCEL_PROJECT_ID=prj_OzAn5Y6gqphOglZrZyGMmdK1yNKl`
+3. GitHub Actions links the project by name using:
+   - project: `trading-signal-ui`
+   - scope: `arungopichands-projects`
 4. Add the frontend environment variable:
    - `VITE_API_BASE_URL`
 5. Set `VITE_API_BASE_URL=https://trading-signal-api-ozlf.onrender.com`
