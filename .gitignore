@@ -11,6 +11,7 @@ obj/
 *.log
 *.out.log
 *.err.log
+.codex-build*/
 
 .DS_Store
 Thumbs.db
