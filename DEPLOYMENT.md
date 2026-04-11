@@ -17,7 +17,6 @@
    - `VERCEL_TOKEN`
    - `VERCEL_ORG_ID`
    - `VERCEL_PROJECT_ID`
-   - `RENDER_DEPLOY_HOOK_URL`
 
 ## Render
 
@@ -29,8 +28,7 @@
    - `SUPABASE_KEY`
    - `CORS_ALLOWED_ORIGINS`
 4. Set `CORS_ALLOWED_ORIGINS` to your Vercel production URL, for example `https://your-app.vercel.app`.
-5. Copy the backend deploy hook URL from Render and store it in GitHub as `RENDER_DEPLOY_HOOK_URL`.
-6. Keep Render auto-deploy disabled for this service because GitHub Actions will trigger deploys after both builds pass.
+5. Keep Render auto-deploy enabled on the `main` branch so backend deploys happen automatically on every production push.
 
 ## Vercel
 
@@ -47,4 +45,4 @@
 2. GitHub Actions builds the backend.
 3. GitHub Actions builds the frontend.
 4. GitHub Actions deploys the frontend to Vercel with the Vercel CLI.
-5. GitHub Actions triggers the backend deploy hook on Render.
+5. Render auto-deploys the backend from `main`.
