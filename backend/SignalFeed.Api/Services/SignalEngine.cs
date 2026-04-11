@@ -1,24 +1,31 @@
+using System.Collections.Concurrent;
 using SignalFeed.Api.Models;
 
 namespace SignalFeed.Api.Services;
 
 public sealed class SignalEngine
 {
-    private const int ScanWindowSize = 10;
+    private const int DefaultScanWindowSize = 12;
     private const int MaxReturnedSignals = 20;
     private const decimal StrongMoveThreshold = 2m;
+    private static readonly TimeSpan SignalDedupWindow = TimeSpan.FromSeconds(5);
     private const int TrendingMemoryLimit = 50;
     private const int TrendingOccurrenceThreshold = 3;
     private const decimal TrendingScoreBoost = 20m;
     private static readonly TimeSpan TrendingWindow = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ActiveSymbolWindow = TimeSpan.FromMinutes(5);
     private static readonly TimeZoneInfo EasternTimeZone = ResolveEasternTimeZone();
 
     private readonly MarketDataService _marketDataService;
     private readonly SymbolUniverseService _symbolUniverseService;
     private readonly ILogger<SignalEngine> _logger;
     private readonly decimal _volumeSpikeThreshold;
+    private readonly decimal _dedupScoreThreshold;
+    private readonly int _scanWindowSize;
+    private readonly int _maxParallelScans;
     private readonly object _stateGate = new();
     private readonly List<SignalOccurrence> _recentSignals = [];
+    private readonly Dictionary<string, (DateTimeOffset Timestamp, decimal Score)> _lastAcceptedSignalBySymbol = new(StringComparer.Ordinal);
     private int _scanOffset;
 
     public SignalEngine(
@@ -33,6 +40,9 @@ public sealed class SignalEngine
         _symbolUniverseService = symbolUniverseService;
         _logger = logger;
         _volumeSpikeThreshold = Math.Max(100_000m, configuration.GetValue<decimal?>("Scanner:VolumeSpikeThreshold") ?? 500_000m);
+        _dedupScoreThreshold = Math.Max(1m, configuration.GetValue<decimal?>("Scanner:DedupScoreThreshold") ?? 10m);
+        _scanWindowSize = Math.Clamp(configuration.GetValue<int?>("Scanner:CycleSymbolCount") ?? DefaultScanWindowSize, 10, 15);
+        _maxParallelScans = Math.Clamp(configuration.GetValue<int?>("Scanner:MaxParallelSymbols") ?? 6, 5, 10);
     }
 
     public async Task<ScanBatchResult> GenerateSignalsAsync(CancellationToken cancellationToken = default)
@@ -48,47 +58,64 @@ public sealed class SignalEngine
             };
         }
 
-        var snapshots = new List<QuoteSnapshot>();
-        var candidates = new List<StockSignal>();
+        var snapshots = new ConcurrentBag<QuoteSnapshot>();
+        var candidates = new ConcurrentBag<StockSignal>();
 
         var universe = await _symbolUniverseService.GetUniverseAsync(cancellationToken);
         if (universe.Count == 0)
         {
             return new ScanBatchResult
             {
-                Snapshots = snapshots,
+                Snapshots = [],
                 Signals = []
             };
         }
 
-        var scanSet = BuildScanSet(universe);
-        foreach (var symbol in scanSet)
+        var scanSet = BuildScanSet(universe, now);
+        using var semaphore = new SemaphoreSlim(_maxParallelScans, _maxParallelScans);
+        var symbolTasks = scanSet.Select(async symbol =>
         {
             cancellationToken.ThrowIfCancellationRequested();
-
-            var unified = await _marketDataService.GetUnifiedMarketDataAsync(symbol, includeNews: true, cancellationToken);
-            if (unified.Price <= 0)
+            await semaphore.WaitAsync(cancellationToken);
+            try
             {
-                continue;
+                var unified = await _marketDataService.GetUnifiedMarketDataAsync(symbol, includeNews: true, cancellationToken);
+                if (unified.Price <= 0)
+                {
+                    return;
+                }
+
+                snapshots.Add(new QuoteSnapshot
+                {
+                    Symbol = unified.Symbol,
+                    CurrentPrice = Math.Round(unified.Price, 2),
+                    PreviousClose = Math.Round(unified.Quote.PreviousClose, 2),
+                    DayHigh = Math.Round(unified.Quote.High, 2),
+                    DayLow = Math.Round(unified.Quote.Low, 2),
+                    ChangePercent = unified.ChangePercent,
+                    ScannedAt = now
+                });
+
+                var candidate = BuildConfluenceSignal(unified, now);
+                if (candidate is not null)
+                {
+                    candidates.Add(candidate);
+                }
             }
-
-            snapshots.Add(new QuoteSnapshot
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                Symbol = unified.Symbol,
-                CurrentPrice = Math.Round(unified.Price, 2),
-                PreviousClose = Math.Round(unified.Quote.PreviousClose, 2),
-                DayHigh = Math.Round(unified.Quote.High, 2),
-                DayLow = Math.Round(unified.Quote.Low, 2),
-                ChangePercent = unified.ChangePercent,
-                ScannedAt = now
-            });
-
-            var candidate = BuildConfluenceSignal(unified, now);
-            if (candidate is not null)
-            {
-                candidates.Add(candidate);
+                // no-op, cooperative cancellation
             }
-        }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Symbol scan failed for {Symbol}. Continuing with remaining symbols.", symbol);
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        });
+        await Task.WhenAll(symbolTasks);
 
         var finalSignals = candidates
             .OrderByDescending(signal => signal.Score)
@@ -96,9 +123,13 @@ public sealed class SignalEngine
             .Take(MaxReturnedSignals)
             .ToList();
 
-        if (finalSignals.Count == 0 && snapshots.Count > 0)
+        var snapshotList = snapshots
+            .OrderByDescending(snapshot => snapshot.ChangePercent)
+            .ToList();
+
+        if (finalSignals.Count == 0 && snapshotList.Count > 0)
         {
-            var snapshot = snapshots[0];
+            var snapshot = snapshotList[0];
             finalSignals.Add(new StockSignal
             {
                 Symbol = snapshot.Symbol,
@@ -126,17 +157,18 @@ public sealed class SignalEngine
         }
 
         ApplyTrendingBoost(finalSignals, now);
-        MarkTopOpportunity(finalSignals);
+        var dedupedSignals = ApplyDeduplication(finalSignals, now);
+        MarkTopOpportunity(dedupedSignals);
 
         _logger.LogInformation(
             "Confluence engine produced {SignalCount} signals from {ScannedCount} symbols.",
-            finalSignals.Count,
+            dedupedSignals.Count,
             scanSet.Count);
 
         return new ScanBatchResult
         {
-            Snapshots = snapshots,
-            Signals = finalSignals
+            Snapshots = snapshotList,
+            Signals = dedupedSignals
         };
     }
 
@@ -401,30 +433,134 @@ public sealed class SignalEngine
         return values.Count(value => value);
     }
 
-    private List<string> BuildScanSet(IReadOnlyList<string> universe)
+    private List<string> BuildScanSet(IReadOnlyList<string> universe, DateTimeOffset now)
     {
-        if (universe.Count <= ScanWindowSize)
+        if (universe.Count <= _scanWindowSize)
         {
             return universe.ToList();
+        }
+
+        var universeSet = new HashSet<string>(universe, StringComparer.Ordinal);
+        var selected = new List<string>(_scanWindowSize);
+        var selectedSet = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var symbol in GetPrioritizedSymbols(now))
+        {
+            if (!universeSet.Contains(symbol))
+            {
+                continue;
+            }
+
+            if (selectedSet.Add(symbol))
+            {
+                selected.Add(symbol);
+                if (selected.Count >= _scanWindowSize)
+                {
+                    return selected;
+                }
+            }
         }
 
         int start;
         lock (_stateGate)
         {
             start = _scanOffset;
-            _scanOffset = (_scanOffset + ScanWindowSize) % universe.Count;
+            _scanOffset = (_scanOffset + _scanWindowSize) % universe.Count;
         }
 
-        var selected = new List<string>(ScanWindowSize);
-        for (var i = 0; i < ScanWindowSize; i++)
+        for (var i = 0; i < universe.Count && selected.Count < _scanWindowSize; i++)
         {
-            selected.Add(universe[(start + i) % universe.Count]);
+            var symbol = universe[(start + i) % universe.Count];
+            if (selectedSet.Add(symbol))
+            {
+                selected.Add(symbol);
+            }
         }
 
         return selected;
     }
 
-    private static void MarkTopOpportunity(IReadOnlyList<StockSignal> signals)
+    private IReadOnlyList<StockSignal> ApplyDeduplication(IReadOnlyList<StockSignal> signals, DateTimeOffset now)
+    {
+        lock (_stateGate)
+        {
+            var kept = new List<StockSignal>(signals.Count);
+
+            foreach (var signal in signals)
+            {
+                var symbol = signal.Symbol?.Trim().ToUpperInvariant() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(symbol))
+                {
+                    continue;
+                }
+
+                if (_lastAcceptedSignalBySymbol.TryGetValue(symbol, out var previous))
+                {
+                    var withinWindow = now - previous.Timestamp <= SignalDedupWindow;
+                    var scoreChange = Math.Abs(signal.Score - previous.Score);
+                    if (withinWindow && scoreChange < _dedupScoreThreshold)
+                    {
+                        _logger.LogDebug(
+                            "Dedup skipped signal for {Symbol}. Age={AgeMs}ms ScoreDelta={ScoreDelta:0.##}.",
+                            symbol,
+                            (now - previous.Timestamp).TotalMilliseconds,
+                            scoreChange);
+                        continue;
+                    }
+                }
+
+                _lastAcceptedSignalBySymbol[symbol] = (now, signal.Score);
+                kept.Add(signal);
+            }
+
+            var staleCutoff = now - SignalDedupWindow - TimeSpan.FromSeconds(5);
+            var staleSymbols = _lastAcceptedSignalBySymbol
+                .Where(pair => pair.Value.Timestamp < staleCutoff)
+                .Select(pair => pair.Key)
+                .ToList();
+            foreach (var symbol in staleSymbols)
+            {
+                _lastAcceptedSignalBySymbol.Remove(symbol);
+            }
+
+            return kept;
+        }
+    }
+
+    private IReadOnlyList<string> GetPrioritizedSymbols(DateTimeOffset now)
+    {
+        lock (_stateGate)
+        {
+            PruneRecentSignals(now);
+
+            // Priority #1: recently triggered symbols.
+            var recentlyTriggered = _recentSignals
+                .Where(item => item.Timestamp >= now - ActiveSymbolWindow)
+                .GroupBy(item => item.Symbol, StringComparer.Ordinal)
+                .OrderByDescending(group => group.Max(item => item.Timestamp))
+                .ThenByDescending(group => group.Count())
+                .Select(group => group.Key)
+                .ToList();
+
+            // Priority #2: trending symbols.
+            var trending = _recentSignals
+                .Where(item => item.Timestamp >= now - TrendingWindow)
+                .GroupBy(item => item.Symbol, StringComparer.Ordinal)
+                .Where(group => group.Count() >= TrendingOccurrenceThreshold)
+                .OrderByDescending(group => group.Count())
+                .ThenByDescending(group => group.Average(item => item.Score))
+                .ThenByDescending(group => group.Max(item => item.Timestamp))
+                .Select(group => group.Key)
+                .ToList();
+
+            return recentlyTriggered
+                .Concat(trending)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+        }
+    }
+
+    private void MarkTopOpportunity(IReadOnlyList<StockSignal> signals)
     {
         foreach (var signal in signals)
         {
@@ -435,6 +571,7 @@ public sealed class SignalEngine
         if (top is not null)
         {
             top.IsTopOpportunity = true;
+            _marketDataService.MarkTopOpportunity(top.Symbol);
         }
     }
 

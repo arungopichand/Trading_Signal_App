@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Caching.Memory;
 using SignalFeed.Api.Models;
 
 namespace SignalFeed.Api.Services;
@@ -12,21 +13,34 @@ public sealed class PolygonService
 
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _configuration;
+    private readonly IMemoryCache _cache;
     private readonly ILogger<PolygonService> _logger;
     private int _missingKeyWarningLogged;
 
     public PolygonService(
         HttpClient httpClient,
         IConfiguration configuration,
+        IMemoryCache cache,
         ILogger<PolygonService> logger)
     {
         _httpClient = httpClient;
         _configuration = configuration;
+        _cache = cache;
         _logger = logger;
     }
 
     public async Task<PolygonAggregateBar?> GetPreviousAggregateAsync(string symbol, CancellationToken cancellationToken = default)
     {
+        var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+        var cacheKey = $"price:{normalizedSymbol}:polygon:prev";
+        if (_cache.TryGetValue<PolygonAggregateBar>(cacheKey, out var cached) && cached is not null)
+        {
+            _logger.LogInformation("Cache HIT {key}", cacheKey);
+            return cached;
+        }
+
+        _logger.LogInformation("Cache MISS {key}", cacheKey);
+
         var apiKey = _configuration["POLYGON__APIKEY"] ?? _configuration["Polygon:ApiKey"];
         if (string.IsNullOrWhiteSpace(apiKey))
         {
@@ -38,7 +52,6 @@ public sealed class PolygonService
             return null;
         }
 
-        var normalizedSymbol = symbol.Trim().ToUpperInvariant();
         var requestUri = $"v2/aggs/ticker/{normalizedSymbol}/prev?adjusted=true&apiKey={Uri.EscapeDataString(apiKey)}";
 
         try
@@ -56,7 +69,9 @@ public sealed class PolygonService
                 return null;
             }
 
-            return payload.Results[0];
+            var output = payload.Results[0];
+            _cache.Set(cacheKey, output, TimeSpan.FromSeconds(5));
+            return output;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException)
         {
@@ -67,6 +82,16 @@ public sealed class PolygonService
 
     public async Task<PolygonSnapshotTicker?> GetSnapshotAsync(string symbol, CancellationToken cancellationToken = default)
     {
+        var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+        var cacheKey = $"price:{normalizedSymbol}:polygon";
+        if (_cache.TryGetValue<PolygonSnapshotTicker>(cacheKey, out var cached) && cached is not null)
+        {
+            _logger.LogInformation("Cache HIT {key}", cacheKey);
+            return cached;
+        }
+
+        _logger.LogInformation("Cache MISS {key}", cacheKey);
+
         var apiKey = _configuration["POLYGON__APIKEY"] ?? _configuration["Polygon:ApiKey"];
         if (string.IsNullOrWhiteSpace(apiKey))
         {
@@ -78,7 +103,6 @@ public sealed class PolygonService
             return null;
         }
 
-        var normalizedSymbol = symbol.Trim().ToUpperInvariant();
         var requestUri = $"v2/snapshot/locale/us/markets/stocks/tickers/{normalizedSymbol}?apiKey={Uri.EscapeDataString(apiKey)}";
 
         try
@@ -98,6 +122,7 @@ public sealed class PolygonService
                 return null;
             }
 
+            _cache.Set(cacheKey, payload.Ticker, TimeSpan.FromSeconds(5));
             return payload.Ticker;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException)

@@ -1,13 +1,11 @@
-using System.Collections.Concurrent;
 using System.Text.Json;
+using Microsoft.Extensions.Caching.Memory;
 using SignalFeed.Api.Models;
 
 namespace SignalFeed.Api.Services;
 
 public sealed class FmpService
 {
-    private sealed record CachedFactors(FmpFactors Value, DateTimeOffset CachedAt);
-
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -15,27 +13,30 @@ public sealed class FmpService
 
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _configuration;
+    private readonly IMemoryCache _cache;
     private readonly ILogger<FmpService> _logger;
-    private readonly ConcurrentDictionary<string, CachedFactors> _cache = new(StringComparer.Ordinal);
     private readonly TimeSpan _cacheWindow = TimeSpan.FromMinutes(10);
     private int _missingKeyWarningLogged;
 
-    public FmpService(HttpClient httpClient, IConfiguration configuration, ILogger<FmpService> logger)
+    public FmpService(HttpClient httpClient, IConfiguration configuration, IMemoryCache cache, ILogger<FmpService> logger)
     {
         _httpClient = httpClient;
         _configuration = configuration;
+        _cache = cache;
         _logger = logger;
     }
 
     public async Task<FmpFactors?> GetFactorsAsync(string symbol, CancellationToken cancellationToken = default)
     {
         var normalizedSymbol = symbol.Trim().ToUpperInvariant();
-        if (_cache.TryGetValue(normalizedSymbol, out var cached) &&
-            DateTimeOffset.UtcNow - cached.CachedAt < _cacheWindow)
+        var cacheKey = $"fundamentals:{normalizedSymbol}";
+        if (_cache.TryGetValue<FmpFactors>(cacheKey, out var cached) && cached is not null)
         {
-            return cached.Value;
+            _logger.LogInformation("Cache HIT {key}", cacheKey);
+            return cached;
         }
 
+        _logger.LogInformation("Cache MISS {key}", cacheKey);
         var apiKey = _configuration["FMP__APIKEY"] ?? _configuration["Fmp:ApiKey"];
         if (string.IsNullOrWhiteSpace(apiKey))
         {
@@ -64,7 +65,7 @@ public sealed class FmpService
             return null;
         }
 
-        _cache[normalizedSymbol] = new CachedFactors(factors, DateTimeOffset.UtcNow);
+        _cache.Set(cacheKey, factors, _cacheWindow);
         _logger.LogInformation("FMP used for {Symbol}.", normalizedSymbol);
         return factors;
     }

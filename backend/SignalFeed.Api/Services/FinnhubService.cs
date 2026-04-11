@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Caching.Memory;
 using SignalFeed.Api.Models;
 
 namespace SignalFeed.Api.Services;
@@ -22,16 +23,19 @@ public class FinnhubService
 
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _config;
+    private readonly IMemoryCache _cache;
     private readonly ILogger<FinnhubService> _logger;
     private int _missingKeyWarningLogged;
 
     public FinnhubService(
         HttpClient httpClient,
         IConfiguration config,
+        IMemoryCache cache,
         ILogger<FinnhubService> logger)
     {
         _httpClient = httpClient;
         _config = config;
+        _cache = cache;
         _logger = logger;
     }
 
@@ -93,7 +97,17 @@ public class FinnhubService
             return null;
         }
 
-        var encodedSymbol = Uri.EscapeDataString(symbol.Trim().ToUpperInvariant());
+        var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+        var cacheKey = $"price:{normalizedSymbol}:finnhub";
+        if (_cache.TryGetValue<QuoteResponse>(cacheKey, out var externalCached) && externalCached is not null)
+        {
+            _logger.LogInformation("Cache HIT {key}", cacheKey);
+            return externalCached;
+        }
+
+        _logger.LogInformation("Cache MISS {key}", cacheKey);
+
+        var encodedSymbol = Uri.EscapeDataString(normalizedSymbol);
         var now = DateTimeOffset.UtcNow;
 
         lock (QuoteCache)
@@ -153,6 +167,8 @@ public class FinnhubService
                 {
                     QuoteCache[encodedSymbol] = new CachedQuote(quote, DateTimeOffset.UtcNow);
                 }
+
+                _cache.Set(cacheKey, quote, TimeSpan.FromSeconds(5));
             }
 
             return quote;
@@ -281,7 +297,17 @@ public class FinnhubService
             return null;
         }
 
-        var encodedSymbol = Uri.EscapeDataString(symbol.Trim().ToUpperInvariant());
+        var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+        var cacheKey = $"news:{normalizedSymbol}:finnhub:latest";
+        if (_cache.TryGetValue<NewsItem>(cacheKey, out var cached) && cached is not null)
+        {
+            _logger.LogInformation("Cache HIT {key}", cacheKey);
+            return cached;
+        }
+
+        _logger.LogInformation("Cache MISS {key}", cacheKey);
+
+        var encodedSymbol = Uri.EscapeDataString(normalizedSymbol);
         var to = DateTime.UtcNow.Date;
         var from = to.AddDays(-14);
 
@@ -301,10 +327,16 @@ public class FinnhubService
 
             await using var stream = await response.Content.ReadAsStreamAsync();
             var items = await JsonSerializer.DeserializeAsync<List<NewsItem>>(stream, JsonOptions);
-            return items?
+            var latest = items?
                 .Where(item => !string.IsNullOrWhiteSpace(item.Headline) && !string.IsNullOrWhiteSpace(item.Url))
                 .OrderByDescending(item => item.Datetime)
                 .FirstOrDefault();
+            if (latest is not null)
+            {
+                _cache.Set(cacheKey, latest, TimeSpan.FromSeconds(60));
+            }
+
+            return latest;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException)
         {
@@ -324,7 +356,17 @@ public class FinnhubService
             return [];
         }
 
-        var encodedSymbol = Uri.EscapeDataString(symbol.Trim().ToUpperInvariant());
+        var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+        var cacheKey = $"news:{normalizedSymbol}:finnhub:{from:yyyyMMdd}:{to:yyyyMMdd}";
+        if (_cache.TryGetValue<IReadOnlyList<NewsItem>>(cacheKey, out var cachedNews) && cachedNews is not null)
+        {
+            _logger.LogInformation("Cache HIT {key}", cacheKey);
+            return cachedNews;
+        }
+
+        _logger.LogInformation("Cache MISS {key}", cacheKey);
+
+        var encodedSymbol = Uri.EscapeDataString(normalizedSymbol);
 
         try
         {
@@ -343,7 +385,9 @@ public class FinnhubService
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             var items = await JsonSerializer.DeserializeAsync<List<NewsItem>>(stream, JsonOptions, cancellationToken);
-            return items ?? [];
+            var output = (IReadOnlyList<NewsItem>)(items ?? []);
+            _cache.Set(cacheKey, output, TimeSpan.FromSeconds(60));
+            return output;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException)
         {
