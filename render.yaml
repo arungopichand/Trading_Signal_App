@@ -1,13 +1,14 @@
 services:
   - type: web
     name: trading-backend
-    runtime: docker
+    runtime: dotnet
     plan: free
     region: ohio
-    dockerfilePath: ./backend/SignalFeed.Api/Dockerfile
-    dockerContext: ./backend
+    rootDir: backend/SignalFeed.Api
+    buildCommand: dotnet restore && dotnet build --configuration Release --no-restore
+    startCommand: dotnet run --urls=http://0.0.0.0:10000
     healthCheckPath: /health
-    autoDeployTrigger: off
+    autoDeployTrigger: commit
     buildFilter:
       paths:
         - backend/**

@@ -1,56 +1,77 @@
-# Deployment Setup
+# Auto-Deployment Setup
 
-## Live Services
+## Target Flow
 
-- Frontend: `https://trading-signal-ui.vercel.app`
-- Backend: `https://trading-signal-api-ozlf.onrender.com`
-- Backend health: `https://trading-signal-api-ozlf.onrender.com/health`
-- Backend signals: `https://trading-signal-api-ozlf.onrender.com/api/signals/current`
-- Last verified deployment wiring: April 11, 2026
+- Push to `dev`:
+  - GitHub Actions runs CI build checks
+  - Vercel creates a preview deployment
+- Push to `main`:
+  - GitHub Actions runs CI build checks
+  - Vercel deploys production frontend
+  - Render deploys production backend
+
+After one-time platform setup, no manual deploy commands are needed.
 
 ## Repository Layout
 
-- `backend/SignalFeed.Api` contains the ASP.NET Core Web API.
-- `signal-ui` contains the Vite React frontend.
-- `render.yaml` provisions the Render backend service.
-- `signal-ui/vercel.json` configures the Vercel frontend deployment.
-- `.github/workflows/deploy.yml` runs CI/CD on every push to `main`.
+- Backend: `backend/SignalFeed.Api`
+- Frontend: `signal-ui`
 
-## GitHub
+## Branch Model
 
-1. Create a GitHub repository for this project.
-2. Add this local repository as `origin`.
-3. Push the `main` branch.
-4. Add these repository secrets:
-   - `VERCEL_TOKEN`
+- `main`: production
+- `dev`: development/preview
 
-## Render
+## GitHub Actions
 
-1. Render service is live at `trading-signal-api`.
-2. The current backend URL is `https://trading-signal-api-ozlf.onrender.com`.
-3. Render is connected to the `main` branch of this repository and auto-deploys on production pushes.
-4. Render should have these backend environment variables:
-   - `FINNHUB__APIKEY`
-   - `SUPABASE_URL`
-   - `SUPABASE_KEY`
-   - `CORS_ALLOWED_ORIGINS`
-5. Set `CORS_ALLOWED_ORIGINS` to `https://trading-signal-ui.vercel.app`.
+Workflow file: `.github/workflows/deploy.yml`
 
-## Vercel
+- Triggers on push to `main` and `dev`
+- Builds frontend (`signal-ui`)
+- Builds backend (`backend/SignalFeed.Api`)
 
-1. Vercel project is live as `trading-signal-ui`.
-2. The production frontend URL is `https://trading-signal-ui.vercel.app`.
-3. GitHub Actions links the project by name using:
-   - project: `trading-signal-ui`
-   - scope: `arungopichands-projects`
-4. Add the frontend environment variable:
-   - `VITE_API_BASE_URL`
-5. Set `VITE_API_BASE_URL=https://trading-signal-api-ozlf.onrender.com`
+## Vercel (Frontend)
 
-## Deployment Flow
+Project configuration:
 
-1. Push to `dev` to run validation only.
-2. Merge `dev` into `main` for production.
-3. GitHub Actions builds the backend and frontend.
-4. GitHub Actions deploys the frontend to Vercel from `main`.
-5. Render auto-deploys the backend from `main`.
+1. Import this repository in Vercel.
+2. Set Root Directory to `signal-ui`.
+3. Framework preset: `Vite`.
+4. Production branch: `main`.
+5. Preview branch flow: `dev` pushes generate preview deployments.
+
+Environment variables (Production + Preview):
+
+- `VITE_API_BASE_URL=https://your-api.onrender.com`
+- `VITE_SIGNALR_HUB_URL=https://your-api.onrender.com/hubs/feed`
+
+`signal-ui/vercel.json` already includes Vite build/output settings.
+
+## Render (Backend)
+
+Blueprint file: `render.yaml`
+
+Configured service:
+
+- Root directory: `backend/SignalFeed.Api`
+- Build: `dotnet restore && dotnet build --configuration Release --no-restore`
+- Start: `dotnet run --urls=http://0.0.0.0:10000`
+- Auto deploy: enabled (`autoDeployTrigger: commit`)
+
+Required environment variables on Render:
+
+- `FINNHUB__APIKEY`
+- `SUPABASE_URL` (if used)
+- `SUPABASE_KEY` (if used)
+- `CORS_ALLOWED_ORIGINS` (set to your Vercel URL)
+
+## Daily Workflow
+
+1. Develop on `dev` and push:
+   - `git checkout dev`
+   - make changes
+   - `git push origin dev`
+2. Promote to production:
+   - `git checkout main`
+   - `git merge dev`
+   - `git push origin main`

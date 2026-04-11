@@ -15,4 +15,7 @@ public class QuoteResponse
 
     [JsonPropertyName("l")]
     public decimal Low { get; set; }
+
+    [JsonPropertyName("v")]
+    public decimal Volume { get; set; }
 }

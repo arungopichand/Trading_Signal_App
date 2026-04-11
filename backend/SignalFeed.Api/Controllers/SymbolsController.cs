@@ -1,5 +1,4 @@
 using Microsoft.AspNetCore.Mvc;
-using SignalFeed.Api.Models;
 using SignalFeed.Api.Services;
 
 namespace SignalFeed.Api.Controllers;
@@ -17,9 +16,9 @@ public class SymbolsController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<ActionResult<IReadOnlyList<TrackedSymbol>>> GetSymbols(CancellationToken cancellationToken)
+    public async Task<ActionResult<IReadOnlyList<string>>> GetSymbols(CancellationToken cancellationToken)
     {
-        var symbols = await _symbolUniverseService.GetSymbolsAsync(cancellationToken);
+        var symbols = await _symbolUniverseService.GetUniverseAsync(cancellationToken);
         return Ok(symbols);
     }
 }

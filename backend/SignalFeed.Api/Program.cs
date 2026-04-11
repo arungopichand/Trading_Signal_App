@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Hosting;
+using SignalFeed.Api.Hubs;
 using SignalFeed.Api.Services;
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -22,11 +23,16 @@ builder.Services.Configure<HostOptions>(options =>
 });
 
 builder.Services.AddControllers();
+builder.Services.AddSignalR();
 
 builder.Services.AddHttpClient<FinnhubService>(client =>
 {
     client.BaseAddress = new Uri("https://finnhub.io/api/v1/");
     client.Timeout = TimeSpan.FromSeconds(15);
+})
+.ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+{
+    UseProxy = false
 });
 
 builder.Services.AddHttpClient<SupabaseDataService>(client =>
@@ -34,44 +40,41 @@ builder.Services.AddHttpClient<SupabaseDataService>(client =>
     client.Timeout = TimeSpan.FromSeconds(15);
 });
 
-builder.Services.AddScoped<SignalEngine>();
-builder.Services.AddScoped<SymbolUniverseService>();
+builder.Services.AddSingleton<SymbolUniverseService>();
+builder.Services.AddSingleton<NewsService>();
+builder.Services.AddSingleton<FeedService>();
+builder.Services.AddSingleton<SignalEngine>();
+builder.Services.AddHostedService<UniverseRefreshBackgroundService>();
 builder.Services.AddHostedService<SignalBackgroundService>();
-
-var allowedOrigins = (builder.Configuration["CORS_ALLOWED_ORIGINS"] ?? string.Empty)
-    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+builder.Services.AddHostedService<FinnhubRealtimeStreamService>();
 
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("ScannerCors", policy =>
+    options.AddPolicy("AllowFrontend", policy =>
     {
-        if (allowedOrigins.Length > 0)
-        {
-            policy.WithOrigins(allowedOrigins)
-                .AllowAnyHeader()
-                .AllowAnyMethod();
-        }
-        else
-        {
-            policy.AllowAnyOrigin()
-                .AllowAnyHeader()
-                .AllowAnyMethod();
-        }
+        policy
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials()
+            .SetIsOriginAllowed(_ => true);
     });
 });
 
 var app = builder.Build();
 
-app.UseCors("ScannerCors");
+app.UseCors("AllowFrontend");
 app.MapGet("/", () => Results.Ok(new
 {
     name = "Trading Signal API",
     status = "running",
     health = "/health",
     symbols = "/api/symbols",
-    signals = "/api/signals/current"
+    signals = "/api/signals/current",
+    feed = "/api/feed",
+    hub = "/hubs/feed"
 }));
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 app.MapControllers();
+app.MapHub<FeedHub>("/hubs/feed");
 
 app.Run();

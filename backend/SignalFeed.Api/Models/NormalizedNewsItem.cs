@@ -1,8 +1,8 @@
 namespace SignalFeed.Api.Models;
 
-public sealed class NewsItem
+public sealed class NormalizedNewsItem
 {
-    public string Category { get; set; } = string.Empty;
+    public string Symbol { get; set; } = string.Empty;
 
     public string Headline { get; set; } = string.Empty;
 
@@ -12,7 +12,7 @@ public sealed class NewsItem
 
     public string Url { get; set; } = string.Empty;
 
-    public long Datetime { get; set; }
+    public DateTimeOffset Datetime { get; set; }
 
-    public string Related { get; set; } = string.Empty;
+    public decimal SentimentScore { get; set; }
 }
