@@ -34,6 +34,8 @@ public sealed class FeedItem
 
     public string Reason { get; set; } = string.Empty;
 
+    public List<string> Reasons { get; set; } = [];
+
     public decimal? FloatShares { get; set; }
 
     public decimal? InstitutionalOwnership { get; set; }

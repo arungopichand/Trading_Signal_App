@@ -30,6 +30,8 @@ public class StockSignal
 
     public string SignalReason { get; set; } = string.Empty;
 
+    public List<string> Reasons { get; set; } = [];
+
     public decimal? FloatShares { get; set; }
 
     public decimal? InstitutionalOwnership { get; set; }
