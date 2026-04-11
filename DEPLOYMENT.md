@@ -24,7 +24,10 @@ After one-time platform setup, no manual deploy commands are needed.
 
 ## GitHub Actions
 
-Workflow file: `.github/workflows/deploy.yml`
+Workflow files:
+
+- `.github/workflows/deploy.yml` (CI/CD + deploy + backend health self-heal)
+- `.github/workflows/redeploy.yml` (auto-retry when CI/CD fails)
 
 - Triggers on push to `main` and `dev`
 - Builds frontend (`signal-ui`)
@@ -32,11 +35,16 @@ Workflow file: `.github/workflows/deploy.yml`
 - On `main` pushes:
   - Deploys frontend to Vercel (if `VERCEL_TOKEN` is set)
   - Triggers Render deploy hook (if `RENDER_DEPLOY_HOOK_URL` is set)
+  - Verifies backend `/health` and auto-retriggers Render deploy once if unhealthy
+- On `dev` pushes:
+  - Deploys frontend preview to Vercel (if `VERCEL_TOKEN` is set)
 
 Required GitHub repository secrets:
 
 - `VERCEL_TOKEN`
+- `VERCEL_DEPLOY_HOOK_URL`
 - `RENDER_DEPLOY_HOOK_URL`
+- `RENDER_HEALTHCHECK_URL` (recommended, e.g. `https://trading-backend-cq8w.onrender.com/health`)
 
 ## Vercel (Frontend)
 

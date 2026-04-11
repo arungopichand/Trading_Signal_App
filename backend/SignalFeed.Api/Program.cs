@@ -61,7 +61,13 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
-Console.WriteLine("=== NEW DEPLOY VERSION: 2026-04-11-R2 ===");
+Console.WriteLine("DEPLOY VERSION: " + DateTime.UtcNow);
+
+var finnhubApiKey = builder.Configuration["FINNHUB:APIKEY"] ?? Environment.GetEnvironmentVariable("FINNHUB__APIKEY");
+if (string.IsNullOrWhiteSpace(finnhubApiKey))
+{
+    Console.WriteLine("ERROR: FINNHUB KEY MISSING");
+}
 
 app.UseCors("AllowFrontend");
 app.MapGet("/", () => Results.Ok(new
