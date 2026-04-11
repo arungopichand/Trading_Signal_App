@@ -152,9 +152,16 @@ public class SupabaseDataService
 
     private bool TryGetSupabaseSettings(out string baseUrl, out string apiKey)
     {
-        baseUrl = (_configuration["SUPABASE_URL"] ?? _configuration["Supabase:Url"] ?? string.Empty).TrimEnd('/');
+        baseUrl = (
+            Environment.GetEnvironmentVariable("SUPABASE_URL")
+            ?? _configuration["SUPABASE_URL"]
+            ?? _configuration["Supabase:Url"]
+            ?? string.Empty).TrimEnd('/');
         apiKey =
-            _configuration["SUPABASE_KEY"]
+            Environment.GetEnvironmentVariable("SUPABASE_KEY")
+            ?? Environment.GetEnvironmentVariable("SUPABASE_SERVICE_ROLE_KEY")
+            ?? Environment.GetEnvironmentVariable("SUPABASE_ANON_KEY")
+            ?? _configuration["SUPABASE_KEY"]
             ?? _configuration["Supabase:Key"]
             ?? _configuration["SUPABASE_SERVICE_ROLE_KEY"]
             ?? _configuration["Supabase:ServiceRoleKey"]

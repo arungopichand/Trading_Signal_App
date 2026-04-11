@@ -118,7 +118,11 @@ public class FinnhubService
 
     private bool TryGetApiKey(out string apiKey)
     {
-        apiKey = _config["FINNHUB__APIKEY"] ?? _config["Finnhub:ApiKey"] ?? string.Empty;
+        apiKey =
+            Environment.GetEnvironmentVariable("FINNHUB__APIKEY")
+            ?? _config["FINNHUB__APIKEY"]
+            ?? _config["Finnhub:ApiKey"]
+            ?? string.Empty;
 
         if (string.IsNullOrWhiteSpace(apiKey))
         {
