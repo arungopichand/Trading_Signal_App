@@ -1,5 +1,8 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Hosting;
 using SignalFeed.Api.Models;
 
 namespace SignalFeed.Api.Services;
@@ -24,30 +27,65 @@ public sealed class MarketDataService : IMarketDataService
     private static readonly TimeSpan NewsTtl = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan FundamentalsTtl = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan TopOpportunityBypassWindow = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan ProviderSkipWindow = TimeSpan.FromSeconds(60);
+    private const int ProviderFailureThreshold = 5;
+    private const string ProviderStatsFileName = "provider-stats.json";
 
-    private readonly FinnhubService _finnhubService;
     private readonly PolygonService _polygonService;
     private readonly NewsAggregationService _newsAggregationService;
     private readonly FmpService _fmpService;
+    private readonly List<IQuoteProvider> _providers;
+    private readonly ApiUsageTracker _apiUsageTracker;
     private readonly IMemoryCache _cache;
     private readonly ILogger<MarketDataService> _logger;
     private readonly ConcurrentDictionary<string, UnifiedMarketData> _lastKnownBySymbol = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _forceFreshSymbols = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, int> _providerFailureCounts = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _disabledProviders = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, double> _smoothedScores = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, ProviderStats> _providerStats = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim _providerStatsFileGate = new(1, 1);
+    private readonly string _providerStatsFilePath;
+    private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true
+    };
+    private long _totalApiCalls;
+    private long _successfulCalls;
+    private long _failedCalls;
+    private long _fallbackUsed;
+    private long _errors;
 
     public MarketDataService(
-        FinnhubService finnhubService,
         PolygonService polygonService,
         NewsAggregationService newsAggregationService,
         FmpService fmpService,
+        IEnumerable<IQuoteProvider> providers,
+        ApiUsageTracker apiUsageTracker,
+        IHostEnvironment hostEnvironment,
         IMemoryCache cache,
         ILogger<MarketDataService> logger)
     {
-        _finnhubService = finnhubService;
         _polygonService = polygonService;
         _newsAggregationService = newsAggregationService;
         _fmpService = fmpService;
+        _providers = providers
+            .Where(provider => provider is not null)
+            .DistinctBy(provider => provider.GetType().FullName)
+            .ToList();
+        _apiUsageTracker = apiUsageTracker;
         _cache = cache;
         _logger = logger;
+        _providerStatsFilePath = Path.Combine(hostEnvironment.ContentRootPath, ProviderStatsFileName);
+
+        foreach (var provider in _providers)
+        {
+            var providerName = provider.GetType().Name;
+            var stats = _providerStats.GetOrAdd(providerName, _ => new ProviderStats { Provider = providerName });
+            _smoothedScores.TryAdd(providerName, (double)ComputeProviderScore(stats));
+        }
+
+        TryLoadProviderPerformanceState();
     }
 
     public async Task<UnifiedMarketData> GetUnifiedMarketDataAsync(
@@ -111,6 +149,92 @@ public sealed class MarketDataService : IMarketDataService
         return result!;
     }
 
+    public async Task<QuoteResponse?> GetQuoteAsync(string symbol, CancellationToken cancellationToken = default)
+    {
+        var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+        if (_providers.Count == 0)
+        {
+            _logger.LogError("[API] ALL_FAILED -> {symbol} (no providers registered)", normalizedSymbol);
+            Interlocked.Increment(ref _failedCalls);
+            Interlocked.Increment(ref _errors);
+            return null;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var rankedProviders = GetRankedProviders(now);
+        var rankingSummary = string.Join(", ", rankedProviders.Select(entry =>
+            $"{entry.Provider.GetType().Name}:{entry.Score:F2}"));
+        _logger.LogInformation("[API] RANKING -> {Ranking}", rankingSummary);
+
+        for (var attempt = 0; attempt < rankedProviders.Count; attempt++)
+        {
+            var provider = rankedProviders[attempt].Provider;
+            var providerName = provider.GetType().Name;
+
+            Interlocked.Increment(ref _totalApiCalls);
+            _logger.LogInformation("[API] TRY -> {Provider}", providerName);
+
+            QuoteResponse? quote = null;
+            var rateLimitHitsBeforeCall = _apiUsageTracker.GetRateLimitHits(providerName);
+            var sw = Stopwatch.StartNew();
+
+            try
+            {
+                quote = await provider.GetQuoteAsync(normalizedSymbol, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[API] FAIL -> {Provider}", providerName);
+            }
+
+            sw.Stop();
+            var rateLimitHitsAfterCall = _apiUsageTracker.GetRateLimitHits(providerName);
+            var rateLimitDelta = Math.Max(0, rateLimitHitsAfterCall - rateLimitHitsBeforeCall);
+
+            if (quote is not null && quote.CurrentPrice > 0m && quote.PreviousClose > 0m)
+            {
+                quote.Provider = providerName;
+                _providerFailureCounts[providerName] = 0;
+                Interlocked.Increment(ref _successfulCalls);
+                if (attempt > 0)
+                {
+                    Interlocked.Increment(ref _fallbackUsed);
+                }
+
+                UpdateProviderStats(providerName, success: true, sw.ElapsedMilliseconds, rateLimitDelta);
+                _logger.LogInformation("[API] SUCCESS -> {Provider} -> {LatencyMs}ms", providerName, sw.ElapsedMilliseconds);
+                return quote;
+            }
+
+            Interlocked.Increment(ref _failedCalls);
+            Interlocked.Increment(ref _errors);
+            UpdateProviderStats(providerName, success: false, sw.ElapsedMilliseconds, rateLimitDelta);
+            var failures = _providerFailureCounts.AddOrUpdate(providerName, 1, (_, count) => count + 1);
+            _logger.LogWarning("[API] FAIL -> {Provider}", providerName);
+
+            if (failures >= ProviderFailureThreshold)
+            {
+                var disabledUntil = DateTime.UtcNow.Add(ProviderSkipWindow);
+                var isAlreadyDisabled = _disabledProviders.TryGetValue(providerName, out var existingUntil) &&
+                    existingUntil > DateTime.UtcNow;
+                _disabledProviders[providerName] = disabledUntil;
+                if (!isAlreadyDisabled)
+                {
+                    _logger.LogWarning("[API] DISABLED -> {Provider}", providerName);
+                }
+            }
+
+            if (attempt < rankedProviders.Count - 1)
+            {
+                var nextProvider = rankedProviders[attempt + 1].Provider.GetType().Name;
+                _logger.LogInformation("[API] FALLBACK -> {NextProvider}", nextProvider);
+            }
+        }
+
+        _logger.LogError("[API] ALL_FAILED -> {symbol}", normalizedSymbol);
+        return null;
+    }
+
     private async Task<PriceCacheEntry> GetOrLoadPriceAsync(string symbol, CancellationToken cancellationToken)
     {
         var cacheKey = $"price:{symbol}";
@@ -158,12 +282,10 @@ public sealed class MarketDataService : IMarketDataService
 
     private async Task<PriceCacheEntry> FetchPriceAsync(string normalizedSymbol, CancellationToken cancellationToken)
     {
-        var finnhubQuoteTask = _finnhubService.GetQuoteAsync(normalizedSymbol);
         var polygonSnapshotTask = _polygonService.GetSnapshotAsync(normalizedSymbol, cancellationToken);
         var polygonAggregateTask = _polygonService.GetPreviousAggregateAsync(normalizedSymbol, cancellationToken);
-        await Task.WhenAll(finnhubQuoteTask, polygonSnapshotTask, polygonAggregateTask);
+        await Task.WhenAll(polygonSnapshotTask, polygonAggregateTask);
 
-        var finnhubQuote = finnhubQuoteTask.Result;
         var polygonSnapshot = polygonSnapshotTask.Result;
         var polygonAggregate = polygonAggregateTask.Result;
 
@@ -176,8 +298,9 @@ public sealed class MarketDataService : IMarketDataService
         var polygonChangePercent = polygonSnapshot?.TodaysChangePercent;
         var polygonVolume = polygonSnapshot?.Day?.Volume ?? 0m;
 
-        var finnhubPrice = finnhubQuote?.CurrentPrice ?? 0m;
-        var finnhubPreviousClose = finnhubQuote?.PreviousClose ?? 0m;
+        QuoteResponse? fallbackQuote = null;
+        decimal finnhubPrice = 0m;
+        decimal finnhubPreviousClose = 0m;
 
         var usePolygonPrice = polygonPrice > 0m && polygonChangePercent is not null;
         var usePolygonVolume = polygonVolume > 0m;
@@ -203,46 +326,53 @@ public sealed class MarketDataService : IMarketDataService
             priceSource = "POLYGON";
             _logger.LogInformation("Polygon used for {Symbol}.", normalizedSymbol);
         }
-        else if (finnhubPrice > 0m && finnhubPreviousClose > 0m)
-        {
-            currentPrice = finnhubPrice;
-            previousClose = finnhubPreviousClose;
-            changePercent = Math.Round(((currentPrice - previousClose) / previousClose) * 100m, 2);
-            openPrice = finnhubQuote?.OpenPrice ?? previousClose;
-            highPrice = finnhubQuote?.High ?? currentPrice;
-            lowPrice = finnhubQuote?.Low ?? currentPrice;
-            priceSource = "FINNHUB";
-            _logger.LogInformation("Finnhub fallback used for {Symbol}.", normalizedSymbol);
-        }
-        else if (_lastKnownBySymbol.TryGetValue(normalizedSymbol, out var cached))
-        {
-            currentPrice = cached.Price > 0 ? cached.Price : 1m;
-            changePercent = cached.ChangePercent;
-            previousClose = currentPrice / (1m + (changePercent / 100m));
-            openPrice = cached.Quote.OpenPrice > 0 ? cached.Quote.OpenPrice : previousClose;
-            highPrice = cached.Quote.High > 0 ? cached.Quote.High : currentPrice;
-            lowPrice = cached.Quote.Low > 0 ? cached.Quote.Low : currentPrice;
-            volume = cached.Volume;
-            return new PriceCacheEntry(
-                CurrentPrice: currentPrice,
-                ChangePercent: changePercent,
-                PreviousClose: previousClose,
-                OpenPrice: openPrice,
-                HighPrice: highPrice,
-                LowPrice: lowPrice,
-                Volume: volume,
-                PriceSource: "CACHED_FALLBACK",
-                VolumeSource: cached.VolumeSource);
-        }
         else
         {
-            currentPrice = 1m;
-            changePercent = 0m;
-            previousClose = 1m;
-            openPrice = 1m;
-            highPrice = 1m;
-            lowPrice = 1m;
-            _logger.LogWarning("All APIs failed for {Symbol}. Emitting minimal fallback market data.", normalizedSymbol);
+            fallbackQuote = await GetQuoteAsync(normalizedSymbol, cancellationToken);
+            finnhubPrice = fallbackQuote?.CurrentPrice ?? 0m;
+            finnhubPreviousClose = fallbackQuote?.PreviousClose ?? 0m;
+
+            if (finnhubPrice > 0m && finnhubPreviousClose > 0m)
+            {
+                Interlocked.Increment(ref _fallbackUsed);
+                currentPrice = finnhubPrice;
+                previousClose = finnhubPreviousClose;
+                changePercent = Math.Round(((currentPrice - previousClose) / previousClose) * 100m, 2);
+                openPrice = fallbackQuote?.OpenPrice > 0m ? fallbackQuote.OpenPrice : previousClose;
+                highPrice = fallbackQuote?.High > 0m ? fallbackQuote.High : currentPrice;
+                lowPrice = fallbackQuote?.Low > 0m ? fallbackQuote.Low : currentPrice;
+                priceSource = "FALLBACK";
+            }
+            else if (_lastKnownBySymbol.TryGetValue(normalizedSymbol, out var cached))
+            {
+                currentPrice = cached.Price > 0 ? cached.Price : 1m;
+                changePercent = cached.ChangePercent;
+                previousClose = currentPrice / (1m + (changePercent / 100m));
+                openPrice = cached.Quote.OpenPrice > 0 ? cached.Quote.OpenPrice : previousClose;
+                highPrice = cached.Quote.High > 0 ? cached.Quote.High : currentPrice;
+                lowPrice = cached.Quote.Low > 0 ? cached.Quote.Low : currentPrice;
+                volume = cached.Volume;
+                return new PriceCacheEntry(
+                    CurrentPrice: currentPrice,
+                    ChangePercent: changePercent,
+                    PreviousClose: previousClose,
+                    OpenPrice: openPrice,
+                    HighPrice: highPrice,
+                    LowPrice: lowPrice,
+                    Volume: volume,
+                    PriceSource: "CACHED_FALLBACK",
+                    VolumeSource: cached.VolumeSource);
+            }
+            else
+            {
+                currentPrice = 1m;
+                changePercent = 0m;
+                previousClose = 1m;
+                openPrice = 1m;
+                highPrice = 1m;
+                lowPrice = 1m;
+                _logger.LogWarning("All APIs failed for {Symbol}. Emitting minimal fallback market data.", normalizedSymbol);
+            }
         }
 
         if (usePolygonVolume)
@@ -252,7 +382,7 @@ public sealed class MarketDataService : IMarketDataService
         }
         else
         {
-            volume = finnhubQuote?.Volume ?? polygonAggregate?.Volume ?? 0m;
+            volume = fallbackQuote?.Volume ?? polygonAggregate?.Volume ?? 0m;
             volumeSource = volume > 0 ? "FINNHUB" : "MINIMAL";
             if (volume > 0)
             {
@@ -349,6 +479,49 @@ public sealed class MarketDataService : IMarketDataService
         return await GetUnifiedMarketDataAsync(symbol, includeNews: true, cancellationToken);
     }
 
+    public MarketDataHealthMetrics GetHealthMetrics()
+    {
+        return new MarketDataHealthMetrics
+        {
+            TotalApiCalls = Interlocked.Read(ref _totalApiCalls),
+            SuccessfulCalls = Interlocked.Read(ref _successfulCalls),
+            FailedCalls = Interlocked.Read(ref _failedCalls),
+            FallbackUsed = Interlocked.Read(ref _fallbackUsed),
+            Errors = Interlocked.Read(ref _errors),
+            ProviderCount = _providers.Count
+        };
+    }
+
+    public async Task PersistProviderPerformanceSnapshotAsync(CancellationToken cancellationToken = default)
+    {
+        var snapshot = CreateProviderPerformanceSnapshot();
+        await _providerStatsFileGate.WaitAsync(cancellationToken);
+        try
+        {
+            var directory = Path.GetDirectoryName(_providerStatsFilePath);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            await using var stream = File.Create(_providerStatsFilePath);
+            await JsonSerializer.SerializeAsync(stream, snapshot, _jsonOptions, cancellationToken);
+            _logger.LogInformation("[API] STATS_SAVED");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Unable to persist provider performance snapshot.");
+        }
+        finally
+        {
+            _providerStatsFileGate.Release();
+        }
+    }
+
     public void MarkTopOpportunity(string symbol)
     {
         if (string.IsNullOrWhiteSpace(symbol))
@@ -374,9 +547,173 @@ public sealed class MarketDataService : IMarketDataService
         return false;
     }
 
+    private bool ShouldSkipProvider(string providerName, DateTimeOffset now)
+    {
+        if (_disabledProviders.TryGetValue(providerName, out var disabledUntil))
+        {
+            if (now.UtcDateTime < disabledUntil)
+            {
+                return true;
+            }
+
+            _disabledProviders.TryRemove(providerName, out _);
+            _providerFailureCounts[providerName] = 0;
+            _logger.LogInformation("[API] RE-ENABLED -> {Provider}", providerName);
+        }
+
+        return false;
+    }
+
+    private List<(IQuoteProvider Provider, double Score)> GetRankedProviders(DateTimeOffset now)
+    {
+        var ranked = new List<(IQuoteProvider Provider, double Score)>(_providers.Count);
+        foreach (var provider in _providers)
+        {
+            var providerName = provider.GetType().Name;
+            if (ShouldSkipProvider(providerName, now))
+            {
+                continue;
+            }
+
+            var stats = _providerStats.GetOrAdd(providerName, name => new ProviderStats { Provider = name });
+            var currentScore = (double)ComputeProviderScore(stats);
+            var oldScore = _smoothedScores.GetOrAdd(providerName, currentScore);
+            var smoothedScore = (oldScore * 0.8d) + (currentScore * 0.2d);
+            _smoothedScores[providerName] = smoothedScore;
+            ranked.Add((provider, smoothedScore));
+        }
+
+        return ranked
+            .OrderByDescending(entry => entry.Score)
+            .ThenBy(entry => entry.Provider.GetType().Name, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static decimal ComputeProviderScore(ProviderStats stats)
+    {
+        var successReward = stats.SuccessRate;
+        var failurePenalty = stats.FailedCalls * 8m;
+        var rateLimitPenalty = stats.RateLimitHits * 35m;
+        var latencyReward = stats.AverageLatencyMs <= 0m
+            ? 20m
+            : Math.Max(0m, 200m - stats.AverageLatencyMs) / 4m;
+        var explorationBonus = stats.TotalCalls < 3 ? 10m : 0m;
+
+        return successReward + latencyReward + explorationBonus - failurePenalty - rateLimitPenalty;
+    }
+
+    private void UpdateProviderStats(string providerName, bool success, long latencyMs, long rateLimitHits)
+    {
+        var stats = _providerStats.GetOrAdd(providerName, name => new ProviderStats { Provider = name });
+        lock (stats)
+        {
+            stats.TotalCalls++;
+            stats.TotalLatencyMs += Math.Max(0, latencyMs);
+            if (success)
+            {
+                stats.SuccessCalls++;
+            }
+            else
+            {
+                stats.FailedCalls++;
+            }
+
+            if (rateLimitHits > 0)
+            {
+                stats.RateLimitHits += rateLimitHits;
+            }
+        }
+    }
+
     private static int ResolveUnifiedTtlSeconds(UnifiedMarketData result)
     {
         var highVolatility = Math.Abs(result.ChangePercent) >= 3m;
         return highVolatility ? 4 : 9;
     }
+
+    private void TryLoadProviderPerformanceState()
+    {
+        try
+        {
+            if (!File.Exists(_providerStatsFilePath))
+            {
+                return;
+            }
+
+            var json = File.ReadAllText(_providerStatsFilePath);
+            var snapshot = JsonSerializer.Deserialize<ProviderPerformanceSnapshot>(json, _jsonOptions);
+            if (snapshot is null)
+            {
+                return;
+            }
+
+            if (snapshot.SmoothedScores is not null)
+            {
+                foreach (var entry in snapshot.SmoothedScores)
+                {
+                    if (string.IsNullOrWhiteSpace(entry.Key))
+                    {
+                        continue;
+                    }
+
+                    _smoothedScores[entry.Key] = entry.Value;
+                }
+            }
+
+            if (snapshot.ProviderStats is not null)
+            {
+                foreach (var entry in snapshot.ProviderStats)
+                {
+                    if (string.IsNullOrWhiteSpace(entry.Key) || entry.Value is null)
+                    {
+                        continue;
+                    }
+
+                    _providerStats[entry.Key] = entry.Value;
+                }
+            }
+
+            _logger.LogInformation("[API] STATS_LOADED");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Provider performance snapshot load skipped (file missing/corrupt/unreadable).");
+        }
+    }
+
+    private ProviderPerformanceSnapshot CreateProviderPerformanceSnapshot()
+    {
+        var statsSnapshot = new Dictionary<string, ProviderStats>(StringComparer.Ordinal);
+        foreach (var entry in _providerStats)
+        {
+            var source = entry.Value;
+            lock (source)
+            {
+                statsSnapshot[entry.Key] = new ProviderStats
+                {
+                    Provider = source.Provider,
+                    TotalCalls = source.TotalCalls,
+                    SuccessCalls = source.SuccessCalls,
+                    FailedCalls = source.FailedCalls,
+                    RateLimitHits = source.RateLimitHits,
+                    TotalLatencyMs = source.TotalLatencyMs
+                };
+            }
+        }
+
+        var scoreSnapshot = _smoothedScores.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        return new ProviderPerformanceSnapshot
+        {
+            SmoothedScores = scoreSnapshot,
+            ProviderStats = statsSnapshot
+        };
+    }
+
+    private sealed class ProviderPerformanceSnapshot
+    {
+        public Dictionary<string, double> SmoothedScores { get; set; } = new(StringComparer.Ordinal);
+
+        public Dictionary<string, ProviderStats> ProviderStats { get; set; } = new(StringComparer.Ordinal);
+    }
 }
+

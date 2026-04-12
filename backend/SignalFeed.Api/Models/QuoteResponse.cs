@@ -24,4 +24,6 @@ public class QuoteResponse
 
     [JsonPropertyName("t")]
     public long Timestamp { get; set; }
+
+    public string Provider { get; set; } = string.Empty;
 }
