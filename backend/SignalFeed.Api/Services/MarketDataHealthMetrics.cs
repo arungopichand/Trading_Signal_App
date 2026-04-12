@@ -24,6 +24,14 @@ public sealed class MarketDataHealthMetrics
 
     public long StaleDataReturnCount { get; set; }
 
+    public double StaleDataRatePercent { get; set; }
+
+    public double ProviderLatencyP50Ms { get; set; }
+
+    public double ProviderLatencyP95Ms { get; set; }
+
+    public double ProviderLatencyP99Ms { get; set; }
+
     public int ProviderCount { get; set; }
 
     public IReadOnlyDictionary<string, ProviderHealthSnapshot> Providers { get; set; } =

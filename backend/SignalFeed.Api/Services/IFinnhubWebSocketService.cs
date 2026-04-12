@@ -10,4 +10,5 @@ public interface IFinnhubWebSocketService
     bool TryGetFreshPrice(string symbol, out StreamPriceSnapshot snapshot);
     bool TryGetAnyPrice(string symbol, out StreamPriceSnapshot snapshot);
     long ReconnectCount { get; }
+    FinnhubStreamHealthSnapshot GetHealthSnapshot();
 }

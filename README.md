@@ -23,14 +23,15 @@ root/
 - `main` = production environment
 
 ## CI/CD Workflows
-Only two workflows are used:
-- `.github/workflows/dev-deploy.yml` on push to `dev`
-- `.github/workflows/prod-deploy.yml` on push to `main`
+Active workflows:
+- `.github/workflows/build.yml` on pull requests to `dev` or `main`
+- `.github/workflows/deploy.yml` on push to `main` (production)
 
-Each workflow:
-- detects changed areas (frontend/backend/supabase)
-- builds only changed parts
-- deploys only changed parts
+Production deploy flow:
+- Build + lint + tests
+- Deploy frontend to Vercel
+- Verify backend readiness via `BACKEND_HEALTHCHECK_URL/health`
+- Run backend smoke check on `/api/feed?limit=1`
 
 ## Local Setup
 1. Copy `.env.example` to `.env` and fill values.
@@ -46,13 +47,7 @@ Each workflow:
 - `VERCEL_TOKEN`
 - `VERCEL_ORG_ID`
 - `VERCEL_PROJECT_ID`
-- `RENDER_STAGING_DEPLOY_HOOK_URL`
-- `RENDER_PRODUCTION_DEPLOY_HOOK_URL`
-- `SUPABASE_ACCESS_TOKEN`
-- `SUPABASE_DEV_PROJECT_REF`
-- `SUPABASE_DEV_DB_PASSWORD`
-- `SUPABASE_PROD_PROJECT_REF`
-- `SUPABASE_PROD_DB_PASSWORD`
+- `BACKEND_HEALTHCHECK_URL` (example: `https://trading-backend-prod.onrender.com`)
 
 ## Documentation
 - [Deployment](docs/deployment.md)

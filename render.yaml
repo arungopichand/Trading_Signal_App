@@ -26,8 +26,6 @@ services:
         sync: false
       - key: CORS_ALLOWED_ORIGINS
         sync: false
-      - key: ENABLE_REALTIME_STREAM
-        value: "false"
       - key: ENABLE_UNIVERSE_REFRESH
         value: "true"
       - key: ENABLE_SIGNAL_SCANNER
@@ -60,8 +58,6 @@ services:
         sync: false
       - key: CORS_ALLOWED_ORIGINS
         sync: false
-      - key: ENABLE_REALTIME_STREAM
-        value: "false"
       - key: ENABLE_UNIVERSE_REFRESH
         value: "true"
       - key: ENABLE_SIGNAL_SCANNER

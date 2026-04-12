@@ -13,6 +13,7 @@ public sealed class MarketDataService : IMarketDataService
     private static readonly TimeSpan QuoteStaleAfter = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan TopOpportunityBypassWindow = TimeSpan.FromSeconds(20);
     private static readonly SemaphoreSlim GlobalApiGate = new(4, 4);
+    private const int MaxLatencySamples = 2000;
     private static readonly object PolygonBudgetGate = new();
     private static readonly Queue<DateTimeOffset> PolygonBudgetWindow = new();
     private const int MaxPolygonCallsPerMinute = 4;
@@ -26,6 +27,8 @@ public sealed class MarketDataService : IMarketDataService
     private readonly ApiUsageTracker _apiUsageTracker;
     private readonly IMemoryCache _cache;
     private readonly ILogger<MarketDataService> _logger;
+    private readonly object _latencyGate = new();
+    private readonly Queue<long> _providerLatencyMsSamples = new();
     private readonly ConcurrentDictionary<string, UnifiedMarketData> _lastKnownBySymbol = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _forceFreshSymbols = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Lazy<Task<QuoteResponse?>>> _inflightQuotes = new(StringComparer.Ordinal);
@@ -40,6 +43,7 @@ public sealed class MarketDataService : IMarketDataService
     private long _cacheHits;
     private long _cacheMisses;
     private long _staleDataReturns;
+    private long _totalQuoteResults;
 
     public MarketDataService(
         FinnhubService finnhubService,
@@ -141,6 +145,7 @@ public sealed class MarketDataService : IMarketDataService
         var quote = await GetOrLoadQuoteAsync(normalizedSymbol, cancellationToken);
         if (IsQuoteUsable(quote))
         {
+            Interlocked.Increment(ref _totalQuoteResults);
             return quote;
         }
 
@@ -148,6 +153,7 @@ public sealed class MarketDataService : IMarketDataService
         {
             Interlocked.Increment(ref _fallbackUsed);
             Interlocked.Increment(ref _staleDataReturns);
+            Interlocked.Increment(ref _totalQuoteResults);
             return fallback.Quote;
         }
 
@@ -167,6 +173,11 @@ public sealed class MarketDataService : IMarketDataService
 
     public MarketDataHealthMetrics GetHealthMetrics()
     {
+        var staleReturns = Interlocked.Read(ref _staleDataReturns);
+        var totalQuoteResults = Math.Max(1, Interlocked.Read(ref _totalQuoteResults));
+        var staleRatePercent = Math.Round((staleReturns * 100d) / totalQuoteResults, 2);
+        var (p50, p95, p99) = GetProviderLatencyPercentiles();
+
         return new MarketDataHealthMetrics
         {
             TotalApiCalls = Interlocked.Read(ref _totalApiCalls),
@@ -179,7 +190,11 @@ public sealed class MarketDataService : IMarketDataService
             RateLimitHits = _apiUsageTracker.GetUsageSnapshot().Sum(x => x.RateLimitHits),
             WebsocketReconnectCount = _quoteStream.ReconnectCount,
             CacheHitRatio = ComputeCacheHitRatio(),
-            StaleDataReturnCount = Interlocked.Read(ref _staleDataReturns),
+            StaleDataReturnCount = staleReturns,
+            StaleDataRatePercent = staleRatePercent,
+            ProviderLatencyP50Ms = p50,
+            ProviderLatencyP95Ms = p95,
+            ProviderLatencyP99Ms = p99,
             ProviderCount = 4,
             Providers = _providerHealth.GetSnapshot()
         };
@@ -201,6 +216,7 @@ public sealed class MarketDataService : IMarketDataService
             RefreshQuoteFreshness(cachedQuote!);
             if (!cachedQuote!.IsStale)
             {
+                Interlocked.Increment(ref _totalQuoteResults);
                 return cachedQuote;
             }
         }
@@ -221,6 +237,7 @@ public sealed class MarketDataService : IMarketDataService
 
         RefreshQuoteFreshness(quote!);
         _cache.Set(cacheKey, quote!, PriceTtl);
+        Interlocked.Increment(ref _totalQuoteResults);
         return quote;
     }
 
@@ -235,6 +252,7 @@ public sealed class MarketDataService : IMarketDataService
             {
                 var quoteFromStream = BuildQuoteFromStream(symbol, streamedPrice);
                 _providerHealth.RecordSuccess("WebSocket", 0);
+                Interlocked.Increment(ref _totalQuoteResults);
                 return quoteFromStream;
             }
         }
@@ -253,6 +271,7 @@ public sealed class MarketDataService : IMarketDataService
             ApplyQuoteTimeDefaults(finnhubQuote!);
             finnhubQuote!.Provider = nameof(FinnhubService);
             RefreshQuoteFreshness(finnhubQuote);
+            Interlocked.Increment(ref _totalQuoteResults);
             return finnhubQuote;
         }
 
@@ -275,6 +294,7 @@ public sealed class MarketDataService : IMarketDataService
             polygonQuote!.Provider = nameof(PolygonService);
             RefreshQuoteFreshness(polygonQuote);
             Interlocked.Increment(ref _fallbackUsed);
+            Interlocked.Increment(ref _totalQuoteResults);
             return polygonQuote;
         }
 
@@ -290,6 +310,7 @@ public sealed class MarketDataService : IMarketDataService
                 "[API] FALLBACK_CACHE -> {Symbol} age={AgeSeconds}s",
                 symbol,
                 copy.AgeSeconds);
+            Interlocked.Increment(ref _totalQuoteResults);
             return copy;
         }
 
@@ -504,8 +525,53 @@ public sealed class MarketDataService : IMarketDataService
         finally
         {
             sw.Stop();
+            TrackProviderLatency(sw.ElapsedMilliseconds);
             GlobalApiGate.Release();
         }
+    }
+
+    private void TrackProviderLatency(long elapsedMs)
+    {
+        lock (_latencyGate)
+        {
+            _providerLatencyMsSamples.Enqueue(Math.Max(0, elapsedMs));
+            while (_providerLatencyMsSamples.Count > MaxLatencySamples)
+            {
+                _providerLatencyMsSamples.Dequeue();
+            }
+        }
+    }
+
+    private (double p50, double p95, double p99) GetProviderLatencyPercentiles()
+    {
+        long[] snapshot;
+        lock (_latencyGate)
+        {
+            snapshot = _providerLatencyMsSamples.ToArray();
+        }
+
+        if (snapshot.Length == 0)
+        {
+            return (0d, 0d, 0d);
+        }
+
+        Array.Sort(snapshot);
+        return (
+            Percentile(snapshot, 0.50),
+            Percentile(snapshot, 0.95),
+            Percentile(snapshot, 0.99));
+    }
+
+    private static double Percentile(long[] sorted, double percentile)
+    {
+        if (sorted.Length == 0)
+        {
+            return 0d;
+        }
+
+        var index = (int)Math.Floor(percentile * (sorted.Length - 1));
+        index = Math.Clamp(index, 0, sorted.Length - 1);
+        return Math.Round((double)sorted[index], 2);
     }
 
     private UnifiedMarketData BuildUnified(

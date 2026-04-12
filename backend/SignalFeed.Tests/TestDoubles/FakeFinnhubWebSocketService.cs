@@ -63,6 +63,18 @@ internal sealed class FakeFinnhubWebSocketService : IFinnhubWebSocketService
         return false;
     }
 
+    public FinnhubStreamHealthSnapshot GetHealthSnapshot()
+    {
+        return new FinnhubStreamHealthSnapshot
+        {
+            IsConnected = true,
+            ReconnectCount = ReconnectCount,
+            ActiveSubscriptionCount = _symbols.Count,
+            CachedPriceCount = _prices.Count,
+            TimestampUtc = DateTimeOffset.UtcNow
+        };
+    }
+
     public void SetPrice(
         string symbol,
         decimal price,

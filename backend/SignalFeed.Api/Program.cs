@@ -141,14 +141,7 @@ builder.Services.AddSingleton<SimulationSignalService>();
 
 var enableSignalScanner = builder.Configuration.GetValue<bool?>("ENABLE_SIGNAL_SCANNER") ?? true;
 var enableUniverseRefresh = builder.Configuration.GetValue<bool?>("ENABLE_UNIVERSE_REFRESH") ?? true;
-var enableRealtimeStream = builder.Configuration.GetValue<bool?>("ENABLE_REALTIME_STREAM") ?? false;
 var enableFinnhubPriceStream = builder.Configuration.GetValue<bool?>("ENABLE_FINNHUB_PRICE_STREAM") ?? true;
-
-if (enableRealtimeStream && enableFinnhubPriceStream)
-{
-    // Prevent duplicate Finnhub websocket loops in a single process.
-    enableRealtimeStream = false;
-}
 
 if (enableFinnhubPriceStream)
 {
@@ -164,11 +157,6 @@ if (enableUniverseRefresh)
 if (enableSignalScanner)
 {
     builder.Services.AddHostedService<SignalBackgroundService>();
-}
-
-if (enableRealtimeStream)
-{
-    builder.Services.AddHostedService<FinnhubRealtimeStreamService>();
 }
 
 var allowedOrigins = ParseAllowedOrigins(
@@ -223,6 +211,24 @@ app.MapGet("/", () => Results.Ok(new
 }));
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok", timestamp = DateTimeOffset.UtcNow }));
+app.MapGet("/health/stream", (IFinnhubWebSocketService stream, MarketDataService marketDataService) =>
+{
+    var streamHealth = stream.GetHealthSnapshot();
+    var marketMetrics = marketDataService.GetHealthMetrics();
+    return Results.Ok(new
+    {
+        status = streamHealth.IsConnected ? "connected" : "degraded",
+        stream = streamHealth,
+        marketData = new
+        {
+            staleDataReturnCount = marketMetrics.StaleDataReturnCount,
+            staleDataRatePercent = marketMetrics.StaleDataRatePercent,
+            websocketReconnectCount = marketMetrics.WebsocketReconnectCount,
+            rateLimitHits = marketMetrics.RateLimitHits
+        },
+        timestamp = DateTimeOffset.UtcNow
+    });
+});
 app.MapControllers();
 app.MapHub<FeedHub>("/hubs/feed");
 

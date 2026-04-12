@@ -37,6 +37,21 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
 
     public long ReconnectCount => Interlocked.Read(ref _reconnectCount);
 
+    public FinnhubStreamHealthSnapshot GetHealthSnapshot()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rateLimitedUntil = _rateLimitedUntilUtc > now ? _rateLimitedUntilUtc : (DateTimeOffset?)null;
+        return new FinnhubStreamHealthSnapshot
+        {
+            IsConnected = _isConnected,
+            ReconnectCount = ReconnectCount,
+            ActiveSubscriptionCount = _subscribedSymbols.Count,
+            CachedPriceCount = _latestPriceBySymbol.Count,
+            RateLimitedUntilUtc = rateLimitedUntil,
+            TimestampUtc = now
+        };
+    }
+
     public async Task SubscribeAsync(string symbol, CancellationToken cancellationToken = default)
     {
         var normalized = NormalizeSymbol(symbol);

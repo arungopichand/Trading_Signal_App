@@ -13,19 +13,22 @@ public sealed class HealthController : ControllerBase
     private readonly IConfiguration _configuration;
     private readonly FeedService _feedService;
     private readonly MarketDataService _marketDataService;
+    private readonly IFinnhubWebSocketService _finnhubWebSocketService;
 
     public HealthController(
         ApiUsageTracker apiUsageTracker,
         ApiKeyStatusProvider apiKeyStatusProvider,
         IConfiguration configuration,
         FeedService feedService,
-        MarketDataService marketDataService)
+        MarketDataService marketDataService,
+        IFinnhubWebSocketService finnhubWebSocketService)
     {
         _apiUsageTracker = apiUsageTracker;
         _apiKeyStatusProvider = apiKeyStatusProvider;
         _configuration = configuration;
         _feedService = feedService;
         _marketDataService = marketDataService;
+        _finnhubWebSocketService = finnhubWebSocketService;
     }
 
     [HttpGet]
@@ -37,6 +40,7 @@ public sealed class HealthController : ControllerBase
         var feed = _feedService.GetRuntimeDiagnostics();
         var symbolSources = _feedService.GetSourceDiagnostics(200);
         var marketData = _marketDataService.GetHealthMetrics();
+        var stream = _finnhubWebSocketService.GetHealthSnapshot();
 
         return Ok(new
         {
@@ -54,6 +58,7 @@ public sealed class HealthController : ControllerBase
             feed,
             symbolSources,
             marketData,
+            stream,
             timestamp = DateTimeOffset.UtcNow
         });
     }

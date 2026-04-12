@@ -26,15 +26,16 @@ The system is a real-time stock intelligence platform:
    - React feed UI + TopOpportunity panel
 
 ## Data Priority
-1. Price/Change: Polygon primary, Finnhub fallback
-2. Volume: Polygon primary, Finnhub fallback
-3. News: NewsAPI primary, Finnhub fallback
+1. Price/Change: Finnhub WebSocket primary, Finnhub REST fallback, Polygon limited fallback
+2. Volume: Finnhub WebSocket/REST primary, Polygon limited fallback
+3. News: NewsAPI global cache primary
 4. Fundamentals: FMP with cache
 
 ## Availability Model
 - Missing provider keys do not crash startup.
 - All-provider failure returns minimal fallback market object.
 - Feed never intentionally returns empty in active cycles.
+- Stream health endpoint available at `/health/stream`.
 
 ## Scalability Foundation
 - Bounded parallel scans (`SemaphoreSlim`)

@@ -5,6 +5,8 @@
    - Returns API metadata and key routes.
 2. `GET /health`
    - Liveness endpoint for platform checks.
+3. `GET /health/stream`
+   - Stream health endpoint with websocket connection state, reconnect count, subscription count, and stale/rate-limit summary.
 
 ## Feed
 1. `GET /api/feed`

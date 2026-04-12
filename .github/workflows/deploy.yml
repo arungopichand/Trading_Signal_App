@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'frontend/**'
+      - 'backend/**'
+      - '.github/workflows/deploy.yml'
+      - 'Trading_Signal_App.sln'
+      - 'render.yaml'
 
 concurrency:
   group: deploy-${{ github.ref }}
@@ -95,8 +101,24 @@ jobs:
           echo "HEALTH_URL=${BACKEND_HEALTHCHECK_URL%/}/health" >> "$GITHUB_ENV"
 
       - name: Wait for Render auto-deploy rollout
-        run: sleep 60
+        run: |
+          echo "Polling backend readiness..."
+          for i in {1..12}; do
+            if curl --fail --show-error --silent "$HEALTH_URL" > /dev/null; then
+              echo "Backend health is ready."
+              exit 0
+            fi
+            echo "Attempt $i/12 failed; retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Backend health endpoint did not become ready in time."
+          exit 1
 
       - name: Health check must return 200
         run: |
           curl --fail --show-error --silent --retry 6 --retry-delay 10 "$HEALTH_URL"
+
+      - name: API smoke test (/api/feed)
+        run: |
+          FEED_URL="${BACKEND_HEALTHCHECK_URL%/}/api/feed?limit=1"
+          curl --fail --show-error --silent --retry 6 --retry-delay 10 "$FEED_URL" > /dev/null

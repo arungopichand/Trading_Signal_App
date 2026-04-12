@@ -5,6 +5,11 @@ on:
     branches:
       - main
       - dev
+    paths:
+      - 'frontend/**'
+      - 'backend/**'
+      - '.github/workflows/build.yml'
+      - 'Trading_Signal_App.sln'
 
 concurrency:
   group: build-${{ github.ref }}
