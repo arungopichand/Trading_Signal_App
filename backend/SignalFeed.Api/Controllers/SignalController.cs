@@ -9,6 +9,12 @@ namespace SignalFeed.Api.Controllers;
 [Produces("application/json")]
 public class SignalController : ControllerBase
 {
+    [HttpGet]
+    public ActionResult<IReadOnlyList<StockSignal>> GetSignals()
+    {
+        return Ok(SignalBackgroundService.CachedSignals);
+    }
+
     [HttpGet("current")]
     public ActionResult<IReadOnlyList<StockSignal>> GetCurrentSignals()
     {

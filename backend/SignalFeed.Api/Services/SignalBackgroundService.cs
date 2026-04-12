@@ -7,6 +7,7 @@ public class SignalBackgroundService : BackgroundService
     private static readonly TimeSpan NoDataWarningWindow = TimeSpan.FromSeconds(10);
     private readonly SignalEngine _signalEngine;
     private readonly FeedService _feedService;
+    private readonly MarketDataService _marketDataService;
     private readonly NewsAggregationService _newsAggregationService;
     private readonly SymbolUniverseService _symbolUniverseService;
     private readonly ILogger<SignalBackgroundService> _logger;
@@ -19,6 +20,7 @@ public class SignalBackgroundService : BackgroundService
     public SignalBackgroundService(
         SignalEngine signalEngine,
         FeedService feedService,
+        MarketDataService marketDataService,
         NewsAggregationService newsAggregationService,
         SymbolUniverseService symbolUniverseService,
         IConfiguration configuration,
@@ -26,6 +28,7 @@ public class SignalBackgroundService : BackgroundService
     {
         _signalEngine = signalEngine;
         _feedService = feedService;
+        _marketDataService = marketDataService;
         _newsAggregationService = newsAggregationService;
         _symbolUniverseService = symbolUniverseService;
         _logger = logger;
@@ -118,6 +121,8 @@ public class SignalBackgroundService : BackgroundService
                     "No real feed data received for over {Seconds} seconds.",
                     NoDataWarningWindow.TotalSeconds);
             }
+
+            await _marketDataService.PersistProviderPerformanceSnapshotAsync(stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {

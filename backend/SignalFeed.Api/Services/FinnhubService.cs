@@ -4,7 +4,7 @@ using SignalFeed.Api.Models;
 
 namespace SignalFeed.Api.Services;
 
-public class FinnhubService
+public class FinnhubService : IQuoteProvider
 {
     private sealed record CachedQuote(QuoteResponse Quote, DateTimeOffset CachedAt);
 
@@ -84,24 +84,29 @@ public class FinnhubService
         }
     }
 
-    public async Task<QuoteResponse?> GetQuoteAsync(string symbol)
+    public async Task<QuoteResponse?> GetQuoteAsync(string symbol, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(symbol))
         {
             _logger.LogWarning("Quote request skipped because the symbol was empty.");
-            return null;
-        }
-
-        if (!TryGetApiKey(out var apiKey))
-        {
+            _logger.LogWarning("Finnhub failed for {symbol}", symbol);
             return null;
         }
 
         var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+        _logger.LogInformation("Finnhub called for {symbol}", normalizedSymbol);
+
+        if (!TryGetApiKey(out var apiKey))
+        {
+            _logger.LogWarning("Finnhub failed for {symbol}", normalizedSymbol);
+            return null;
+        }
+
         var cacheKey = $"price:{normalizedSymbol}:finnhub";
         if (_cache.TryGetValue<QuoteResponse>(cacheKey, out var externalCached) && externalCached is not null)
         {
             _logger.LogInformation("Cache HIT {key}", cacheKey);
+            _logger.LogInformation("Finnhub success for {symbol}", normalizedSymbol);
             return externalCached;
         }
 
@@ -120,6 +125,7 @@ public class FinnhubService
                         "Quote request skipped for {Symbol}; cooldown active for {Seconds} more seconds.",
                         encodedSymbol,
                         Math.Ceiling((cooldownUntil - now).TotalSeconds));
+                    _logger.LogWarning("Finnhub failed for {symbol}", normalizedSymbol);
                     return null;
                 }
 
@@ -136,9 +142,11 @@ public class FinnhubService
         {
             using var response = await GetWithThrottleAsync(
                 $"quote?symbol={encodedSymbol}&token={apiKey}",
+                cancellationToken,
                 symbolForCooldown: encodedSymbol);
             if (response is null)
             {
+                _logger.LogWarning("Finnhub failed for {symbol}", normalizedSymbol);
                 return null;
             }
 
@@ -147,6 +155,7 @@ public class FinnhubService
                 _logger.LogWarning(
                     "Finnhub quote request hit the rate limit for {Symbol}. Returning null.",
                     encodedSymbol);
+                _logger.LogWarning("Finnhub failed for {symbol}", normalizedSymbol);
                 return null;
             }
 
@@ -156,6 +165,7 @@ public class FinnhubService
                     "Finnhub quote request failed for {Symbol} with status code {StatusCode}.",
                     encodedSymbol,
                     response.StatusCode);
+                _logger.LogWarning("Finnhub failed for {symbol}", normalizedSymbol);
                 return null;
             }
 
@@ -169,6 +179,11 @@ public class FinnhubService
                 }
 
                 _cache.Set(cacheKey, quote, TimeSpan.FromSeconds(5));
+                _logger.LogInformation("Finnhub success for {symbol}", normalizedSymbol);
+            }
+            else
+            {
+                _logger.LogWarning("Finnhub failed for {symbol}", normalizedSymbol);
             }
 
             return quote;
@@ -176,11 +191,13 @@ public class FinnhubService
         catch (HttpRequestException ex)
         {
             _logger.LogWarning(ex, "HTTP error while retrieving quote for {Symbol}.", encodedSymbol);
+            _logger.LogWarning("Finnhub failed for {symbol}", normalizedSymbol);
             return null;
         }
         catch (JsonException ex)
         {
             _logger.LogWarning(ex, "JSON parse error while retrieving quote for {Symbol}.", encodedSymbol);
+            _logger.LogWarning("Finnhub failed for {symbol}", normalizedSymbol);
             return null;
         }
     }
