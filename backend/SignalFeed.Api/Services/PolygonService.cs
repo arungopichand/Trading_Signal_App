@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Net;
 using Microsoft.Extensions.Caching.Memory;
 using SignalFeed.Api.Models;
 
@@ -6,6 +7,11 @@ namespace SignalFeed.Api.Services;
 
 public sealed class PolygonService : IQuoteProvider
 {
+    private static readonly TimeSpan GeneralFailureCooldown = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan AuthFailureCooldown = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan RateLimitCooldown = TimeSpan.FromMinutes(2);
+    private const int ConsecutiveFailureThreshold = 5;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -15,6 +21,9 @@ public sealed class PolygonService : IQuoteProvider
     private readonly IConfiguration _configuration;
     private readonly IMemoryCache _cache;
     private readonly ILogger<PolygonService> _logger;
+    private readonly object _stateGate = new();
+    private int _consecutiveFailures;
+    private DateTimeOffset _disabledUntil = DateTimeOffset.MinValue;
     private int _missingKeyWarningLogged;
 
     public PolygonService(
@@ -32,6 +41,15 @@ public sealed class PolygonService : IQuoteProvider
     public async Task<PolygonAggregateBar?> GetPreviousAggregateAsync(string symbol, CancellationToken cancellationToken = default)
     {
         var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+        if (IsTemporarilyDisabled(out var disabledFor))
+        {
+            _logger.LogInformation(
+                "Polygon temporarily disabled for {Seconds}s. Skipping aggregate fetch for {Symbol}.",
+                Math.Ceiling(disabledFor.TotalSeconds),
+                normalizedSymbol);
+            return null;
+        }
+
         var cacheKey = $"price:{normalizedSymbol}:polygon:prev";
         if (_cache.TryGetValue<PolygonAggregateBar>(cacheKey, out var cached) && cached is not null)
         {
@@ -59,6 +77,7 @@ public sealed class PolygonService : IQuoteProvider
             using var response = await _httpClient.GetAsync(requestUri, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
+                RegisterFailure(response.StatusCode, "aggregate", normalizedSymbol);
                 return null;
             }
 
@@ -66,16 +85,19 @@ public sealed class PolygonService : IQuoteProvider
             var payload = await JsonSerializer.DeserializeAsync<PolygonAggregateResponse>(stream, JsonOptions, cancellationToken);
             if (payload is null || payload.Results.Count == 0)
             {
+                RegisterFailure(null, "aggregate-empty", normalizedSymbol);
                 return null;
             }
 
             var output = payload.Results[0];
             _cache.Set(cacheKey, output, TimeSpan.FromSeconds(5));
+            RegisterSuccess();
             return output;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException)
         {
             _logger.LogDebug(ex, "Polygon aggregate fetch failed for {Symbol}.", symbol);
+            RegisterFailure(null, "aggregate-exception", normalizedSymbol);
             return null;
         }
     }
@@ -83,6 +105,15 @@ public sealed class PolygonService : IQuoteProvider
     public async Task<PolygonSnapshotTicker?> GetSnapshotAsync(string symbol, CancellationToken cancellationToken = default)
     {
         var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+        if (IsTemporarilyDisabled(out var disabledFor))
+        {
+            _logger.LogInformation(
+                "Polygon temporarily disabled for {Seconds}s. Skipping snapshot fetch for {Symbol}.",
+                Math.Ceiling(disabledFor.TotalSeconds),
+                normalizedSymbol);
+            return null;
+        }
+
         var cacheKey = $"price:{normalizedSymbol}:polygon";
         if (_cache.TryGetValue<PolygonSnapshotTicker>(cacheKey, out var cached) && cached is not null)
         {
@@ -110,6 +141,7 @@ public sealed class PolygonService : IQuoteProvider
             using var response = await _httpClient.GetAsync(requestUri, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
+                RegisterFailure(response.StatusCode, "snapshot", normalizedSymbol);
                 return null;
             }
 
@@ -119,15 +151,18 @@ public sealed class PolygonService : IQuoteProvider
                 !string.Equals(payload.Status, "OK", StringComparison.OrdinalIgnoreCase) ||
                 payload.Ticker is null)
             {
+                RegisterFailure(null, "snapshot-empty", normalizedSymbol);
                 return null;
             }
 
             _cache.Set(cacheKey, payload.Ticker, TimeSpan.FromSeconds(5));
+            RegisterSuccess();
             return payload.Ticker;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException)
         {
             _logger.LogDebug(ex, "Polygon snapshot fetch failed for {Symbol}.", symbol);
+            RegisterFailure(null, "snapshot-exception", normalizedSymbol);
             return null;
         }
     }
@@ -172,5 +207,72 @@ public sealed class PolygonService : IQuoteProvider
             Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
             Provider = nameof(PolygonService)
         };
+    }
+
+    private bool IsTemporarilyDisabled(out TimeSpan remaining)
+    {
+        lock (_stateGate)
+        {
+            var now = DateTimeOffset.UtcNow;
+            if (_disabledUntil > now)
+            {
+                remaining = _disabledUntil - now;
+                return true;
+            }
+
+            remaining = TimeSpan.Zero;
+            return false;
+        }
+    }
+
+    private void RegisterSuccess()
+    {
+        lock (_stateGate)
+        {
+            _consecutiveFailures = 0;
+        }
+    }
+
+    private void RegisterFailure(HttpStatusCode? statusCode, string context, string symbol)
+    {
+        lock (_stateGate)
+        {
+            _consecutiveFailures++;
+            var now = DateTimeOffset.UtcNow;
+
+            if (statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            {
+                _disabledUntil = now.Add(AuthFailureCooldown);
+                _consecutiveFailures = 0;
+                _logger.LogWarning(
+                    "Polygon {Context} unauthorized/forbidden for {Symbol}. Cooling down for {Minutes}m.",
+                    context,
+                    symbol,
+                    AuthFailureCooldown.TotalMinutes);
+                return;
+            }
+
+            if (statusCode == (HttpStatusCode)429)
+            {
+                _disabledUntil = now.Add(RateLimitCooldown);
+                _consecutiveFailures = 0;
+                _logger.LogWarning(
+                    "Polygon {Context} rate-limited for {Symbol}. Cooling down for {Minutes}m.",
+                    context,
+                    symbol,
+                    RateLimitCooldown.TotalMinutes);
+                return;
+            }
+
+            if (_consecutiveFailures >= ConsecutiveFailureThreshold)
+            {
+                _disabledUntil = now.Add(GeneralFailureCooldown);
+                _consecutiveFailures = 0;
+                _logger.LogWarning(
+                    "Polygon {Context} repeated failures reached threshold. Cooling down for {Minutes}m.",
+                    context,
+                    GeneralFailureCooldown.TotalMinutes);
+            }
+        }
     }
 }

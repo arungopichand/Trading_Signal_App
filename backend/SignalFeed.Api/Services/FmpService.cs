@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Caching.Memory;
@@ -11,13 +12,20 @@ public sealed class FmpService : IQuoteProvider
     {
         PropertyNameCaseInsensitive = true
     };
+    private static readonly TimeSpan GeneralFailureCooldown = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan AuthFailureCooldown = TimeSpan.FromMinutes(20);
+    private static readonly TimeSpan RateLimitCooldown = TimeSpan.FromMinutes(3);
+    private const int ConsecutiveFailureThreshold = 5;
 
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _configuration;
     private readonly IMemoryCache _cache;
     private readonly ILogger<FmpService> _logger;
+    private readonly object _stateGate = new();
     private readonly TimeSpan _cacheWindow = TimeSpan.FromMinutes(10);
     private readonly TimeSpan _quoteCacheWindow = TimeSpan.FromSeconds(5);
+    private int _consecutiveFailures;
+    private DateTimeOffset _disabledUntil = DateTimeOffset.MinValue;
     private int _missingKeyWarningLogged;
 
     public FmpService(HttpClient httpClient, IConfiguration configuration, IMemoryCache cache, ILogger<FmpService> logger)
@@ -31,6 +39,15 @@ public sealed class FmpService : IQuoteProvider
     public async Task<FmpFactors?> GetFactorsAsync(string symbol, CancellationToken cancellationToken = default)
     {
         var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+        if (IsTemporarilyDisabled(out var disabledFor))
+        {
+            _logger.LogInformation(
+                "FMP temporarily disabled for {Seconds}s. Skipping fundamentals for {Symbol}.",
+                Math.Ceiling(disabledFor.TotalSeconds),
+                normalizedSymbol);
+            return null;
+        }
+
         var cacheKey = $"fundamentals:{normalizedSymbol}";
         if (_cache.TryGetValue<FmpFactors>(cacheKey, out var cached) && cached is not null)
         {
@@ -64,10 +81,12 @@ public sealed class FmpService : IQuoteProvider
 
         if (factors.MarketCap is null && factors.FloatShares is null && factors.InstitutionalOwnership is null)
         {
+            RegisterFailure(null, "factors-empty", normalizedSymbol);
             return null;
         }
 
         _cache.Set(cacheKey, factors, _cacheWindow);
+        RegisterSuccess();
         _logger.LogInformation("FMP used for {Symbol}.", normalizedSymbol);
         return factors;
     }
@@ -75,12 +94,21 @@ public sealed class FmpService : IQuoteProvider
     public async Task<QuoteResponse?> GetQuoteAsync(string symbol, CancellationToken cancellationToken = default)
     {
         var normalizedSymbol = symbol.Trim().ToUpperInvariant();
-        _logger.LogInformation("[API] START → FmpService → {symbol}", normalizedSymbol);
+        if (IsTemporarilyDisabled(out var disabledFor))
+        {
+            _logger.LogInformation(
+                "[API] SKIP -> FmpService -> cooldown active for {Seconds}s ({symbol})",
+                Math.Ceiling(disabledFor.TotalSeconds),
+                normalizedSymbol);
+            return null;
+        }
+
+        _logger.LogInformation("[API] START -> FmpService -> {symbol}", normalizedSymbol);
 
         var cacheKey = $"price:{normalizedSymbol}:fmp";
         if (_cache.TryGetValue<QuoteResponse>(cacheKey, out var cached) && cached is not null)
         {
-            _logger.LogInformation("[API] SUCCESS → FmpService");
+            _logger.LogInformation("[API] SUCCESS -> FmpService");
             return cached;
         }
 
@@ -92,7 +120,7 @@ public sealed class FmpService : IQuoteProvider
                 _logger.LogWarning("FMP__APIKEY missing. Continuing without Financial Modeling Prep quote fallback.");
             }
 
-            _logger.LogWarning("[API] FAIL → FmpService → Missing API key");
+            _logger.LogWarning("[API] FAIL -> FmpService -> Missing API key");
             return null;
         }
 
@@ -102,7 +130,8 @@ public sealed class FmpService : IQuoteProvider
             using var response = await _httpClient.GetAsync(uri, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogWarning("[API] FAIL → FmpService → HTTP {StatusCode}", (int)response.StatusCode);
+                RegisterFailure(response.StatusCode, "quote-http", normalizedSymbol);
+                _logger.LogWarning("[API] FAIL -> FmpService -> HTTP {StatusCode}", (int)response.StatusCode);
                 return null;
             }
 
@@ -111,7 +140,8 @@ public sealed class FmpService : IQuoteProvider
             var item = payload?.FirstOrDefault();
             if (item is null || item.Price is null || item.Price <= 0m)
             {
-                _logger.LogWarning("[API] FAIL → FmpService → Empty or invalid quote payload");
+                RegisterFailure(null, "quote-empty", normalizedSymbol);
+                _logger.LogWarning("[API] FAIL -> FmpService -> Empty or invalid quote payload");
                 return null;
             }
 
@@ -129,12 +159,14 @@ public sealed class FmpService : IQuoteProvider
             };
 
             _cache.Set(cacheKey, quote, _quoteCacheWindow);
-            _logger.LogInformation("[API] SUCCESS → FmpService");
+            RegisterSuccess();
+            _logger.LogInformation("[API] SUCCESS -> FmpService");
             return quote;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException or InvalidOperationException)
         {
-            _logger.LogWarning("[API] FAIL → FmpService → {error}", ex.Message);
+            RegisterFailure(null, "quote-exception", normalizedSymbol);
+            _logger.LogWarning("[API] FAIL -> FmpService -> {error}", ex.Message);
             return null;
         }
     }
@@ -147,16 +179,24 @@ public sealed class FmpService : IQuoteProvider
             using var response = await _httpClient.GetAsync(uri, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
+                RegisterFailure(response.StatusCode, "profile-http", symbol);
                 return null;
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             var payload = await JsonSerializer.DeserializeAsync<List<FmpProfileItem>>(stream, JsonOptions, cancellationToken);
-            return payload?.FirstOrDefault()?.MarketCap;
+            var value = payload?.FirstOrDefault()?.MarketCap;
+            if (value is null)
+            {
+                RegisterFailure(null, "profile-empty", symbol);
+            }
+
+            return value;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException or InvalidOperationException)
         {
             _logger.LogDebug(ex, "FMP profile fetch failed for {Symbol}.", symbol);
+            RegisterFailure(null, "profile-exception", symbol);
             return null;
         }
     }
@@ -169,16 +209,24 @@ public sealed class FmpService : IQuoteProvider
             using var response = await _httpClient.GetAsync(uri, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
+                RegisterFailure(response.StatusCode, "float-http", symbol);
                 return null;
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             var payload = await JsonSerializer.DeserializeAsync<List<FmpFloatSharesItem>>(stream, JsonOptions, cancellationToken);
-            return payload?.FirstOrDefault()?.FloatShares;
+            var value = payload?.FirstOrDefault()?.FloatShares;
+            if (value is null)
+            {
+                RegisterFailure(null, "float-empty", symbol);
+            }
+
+            return value;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException or InvalidOperationException)
         {
             _logger.LogDebug(ex, "FMP float-shares fetch failed for {Symbol}.", symbol);
+            RegisterFailure(null, "float-exception", symbol);
             return null;
         }
     }
@@ -191,17 +239,92 @@ public sealed class FmpService : IQuoteProvider
             using var response = await _httpClient.GetAsync(uri, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
+                RegisterFailure(response.StatusCode, "institutional-http", symbol);
                 return null;
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             var payload = await JsonSerializer.DeserializeAsync<List<FmpInstitutionalOwnershipItem>>(stream, JsonOptions, cancellationToken);
-            return payload?.FirstOrDefault()?.OwnershipPercent;
+            var value = payload?.FirstOrDefault()?.OwnershipPercent;
+            if (value is null)
+            {
+                RegisterFailure(null, "institutional-empty", symbol);
+            }
+
+            return value;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException or InvalidOperationException)
         {
             _logger.LogDebug(ex, "FMP institutional ownership fetch failed for {Symbol}.", symbol);
+            RegisterFailure(null, "institutional-exception", symbol);
             return null;
+        }
+    }
+
+    private bool IsTemporarilyDisabled(out TimeSpan remaining)
+    {
+        lock (_stateGate)
+        {
+            var now = DateTimeOffset.UtcNow;
+            if (_disabledUntil > now)
+            {
+                remaining = _disabledUntil - now;
+                return true;
+            }
+
+            remaining = TimeSpan.Zero;
+            return false;
+        }
+    }
+
+    private void RegisterSuccess()
+    {
+        lock (_stateGate)
+        {
+            _consecutiveFailures = 0;
+        }
+    }
+
+    private void RegisterFailure(HttpStatusCode? statusCode, string context, string symbol)
+    {
+        lock (_stateGate)
+        {
+            _consecutiveFailures++;
+            var now = DateTimeOffset.UtcNow;
+
+            if (statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            {
+                _disabledUntil = now.Add(AuthFailureCooldown);
+                _consecutiveFailures = 0;
+                _logger.LogWarning(
+                    "FMP {Context} unauthorized/forbidden for {Symbol}. Cooling down for {Minutes}m.",
+                    context,
+                    symbol,
+                    AuthFailureCooldown.TotalMinutes);
+                return;
+            }
+
+            if (statusCode == (HttpStatusCode)429)
+            {
+                _disabledUntil = now.Add(RateLimitCooldown);
+                _consecutiveFailures = 0;
+                _logger.LogWarning(
+                    "FMP {Context} rate-limited for {Symbol}. Cooling down for {Minutes}m.",
+                    context,
+                    symbol,
+                    RateLimitCooldown.TotalMinutes);
+                return;
+            }
+
+            if (_consecutiveFailures >= ConsecutiveFailureThreshold)
+            {
+                _disabledUntil = now.Add(GeneralFailureCooldown);
+                _consecutiveFailures = 0;
+                _logger.LogWarning(
+                    "FMP {Context} repeated failures reached threshold. Cooling down for {Minutes}m.",
+                    context,
+                    GeneralFailureCooldown.TotalMinutes);
+            }
         }
     }
 
