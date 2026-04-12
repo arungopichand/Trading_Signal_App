@@ -4,7 +4,7 @@ using SignalFeed.Api.Models;
 
 namespace SignalFeed.Api.Services;
 
-public sealed class PolygonService
+public sealed class PolygonService : IQuoteProvider
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -130,5 +130,47 @@ public sealed class PolygonService
             _logger.LogDebug(ex, "Polygon snapshot fetch failed for {Symbol}.", symbol);
             return null;
         }
+    }
+
+    public async Task<QuoteResponse?> GetQuoteAsync(string symbol, CancellationToken cancellationToken = default)
+    {
+        var normalizedSymbol = symbol.Trim().ToUpperInvariant();
+        var snapshotTask = GetSnapshotAsync(normalizedSymbol, cancellationToken);
+        var previousTask = GetPreviousAggregateAsync(normalizedSymbol, cancellationToken);
+        await Task.WhenAll(snapshotTask, previousTask);
+
+        var snapshot = snapshotTask.Result;
+        var previous = previousTask.Result;
+        if (snapshot is null)
+        {
+            return null;
+        }
+
+        var price = snapshot.LastTrade?.Price ?? snapshot.Day?.Close ?? 0m;
+        if (price <= 0m)
+        {
+            return null;
+        }
+
+        var changePercent = snapshot.TodaysChangePercent;
+        var previousClose = changePercent is not null
+            ? price / (1m + (changePercent.Value / 100m))
+            : previous?.Close ?? 0m;
+        if (previousClose <= 0m)
+        {
+            previousClose = price;
+        }
+
+        return new QuoteResponse
+        {
+            CurrentPrice = Math.Round(price, 2),
+            PreviousClose = Math.Round(previousClose, 2),
+            OpenPrice = Math.Round(snapshot.Day?.Open ?? previous?.Open ?? previousClose, 2),
+            High = Math.Round(snapshot.Day?.High ?? previous?.High ?? price, 2),
+            Low = Math.Round(snapshot.Day?.Low ?? previous?.Low ?? price, 2),
+            Volume = Math.Round(snapshot.Day?.Volume ?? previous?.Volume ?? 0m, 0),
+            Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            Provider = nameof(PolygonService)
+        };
     }
 }

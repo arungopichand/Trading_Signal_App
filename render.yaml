@@ -1,6 +1,37 @@
 services:
   - type: web
-    name: trading-backend
+    name: trading-backend-staging
+    runtime: docker
+    plan: free
+    region: ohio
+    branch: dev
+    dockerfilePath: ./backend/SignalFeed.Api/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    buildFilter:
+      paths:
+        - backend/**
+        - render.yaml
+        - .github/workflows/deploy.yml
+    envVars:
+      - key: FINNHUB__APIKEY
+        sync: false
+      - key: POLYGON__APIKEY
+        sync: false
+      - key: NEWSAPI__APIKEY
+        sync: false
+      - key: FMP__APIKEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+
+  - type: web
+    name: trading-backend-prod
     runtime: docker
     plan: free
     region: ohio
@@ -13,9 +44,15 @@ services:
       paths:
         - backend/**
         - render.yaml
-        - .github/workflows/deploy.yml
+        - .github/workflows/redeploy.yml
     envVars:
       - key: FINNHUB__APIKEY
+        sync: false
+      - key: POLYGON__APIKEY
+        sync: false
+      - key: NEWSAPI__APIKEY
+        sync: false
+      - key: FMP__APIKEY
         sync: false
       - key: SUPABASE_URL
         sync: false

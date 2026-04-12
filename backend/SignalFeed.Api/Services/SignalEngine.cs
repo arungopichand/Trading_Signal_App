@@ -16,7 +16,7 @@ public sealed class SignalEngine
     private static readonly TimeSpan ActiveSymbolWindow = TimeSpan.FromMinutes(5);
     private static readonly TimeZoneInfo EasternTimeZone = ResolveEasternTimeZone();
 
-    private readonly MarketDataService _marketDataService;
+    private readonly IMarketDataService _marketDataService;
     private readonly SymbolUniverseService _symbolUniverseService;
     private readonly ILogger<SignalEngine> _logger;
     private readonly decimal _volumeSpikeThreshold;
@@ -29,10 +29,8 @@ public sealed class SignalEngine
     private int _scanOffset;
 
     public SignalEngine(
-        MarketDataService marketDataService,
-        FinnhubService finnhubService,
+        IMarketDataService marketDataService,
         SymbolUniverseService symbolUniverseService,
-        NewsAggregationService newsAggregationService,
         IConfiguration configuration,
         ILogger<SignalEngine> logger)
     {
@@ -82,7 +80,31 @@ public sealed class SignalEngine
                 var unified = await _marketDataService.GetUnifiedMarketDataAsync(symbol, includeNews: true, cancellationToken);
                 if (unified.Price <= 0)
                 {
-                    return;
+                    var fallbackQuote = await _marketDataService.GetQuoteAsync(symbol, cancellationToken);
+                    if (fallbackQuote is null || fallbackQuote.CurrentPrice <= 0m)
+                    {
+                        _logger.LogWarning("Skipping {Symbol}: both primary and fallback quote providers failed.", symbol);
+                        return;
+                    }
+
+                    var previousClose = fallbackQuote.PreviousClose > 0m
+                        ? fallbackQuote.PreviousClose
+                        : fallbackQuote.CurrentPrice;
+                    var changePercent = previousClose > 0m
+                        ? Math.Round(((fallbackQuote.CurrentPrice - previousClose) / previousClose) * 100m, 2)
+                        : 0m;
+
+                    unified = new UnifiedMarketData
+                    {
+                        Symbol = symbol,
+                        Price = fallbackQuote.CurrentPrice,
+                        ChangePercent = changePercent,
+                        Volume = fallbackQuote.Volume,
+                        Sentiment = changePercent >= 0m ? "BULLISH" : "BEARISH",
+                        Quote = fallbackQuote,
+                        PriceSource = "FALLBACK",
+                        VolumeSource = fallbackQuote.Volume > 0m ? "FALLBACK" : "MINIMAL"
+                    };
                 }
 
                 snapshots.Add(new QuoteSnapshot
