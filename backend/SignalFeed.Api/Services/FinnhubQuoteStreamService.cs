@@ -25,6 +25,7 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
     private ClientWebSocket? _socket;
     private volatile bool _isConnected;
     private long _reconnectCount;
+    private DateTimeOffset _rateLimitedUntilUtc = DateTimeOffset.MinValue;
 
     public FinnhubQuoteStreamService(
         IOptionsMonitor<FinnhubWebSocketOptions> optionsMonitor,
@@ -153,8 +154,20 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
             while (!stoppingToken.IsCancellationRequested)
             {
                 ClientWebSocket? localSocket = null;
+                var skipBackoffWait = false;
                 try
                 {
+                    var now = DateTimeOffset.UtcNow;
+                    if (_rateLimitedUntilUtc > now)
+                    {
+                        var waitFor = _rateLimitedUntilUtc - now;
+                        _logger.LogWarning(
+                            "Finnhub websocket reconnect paused by rate-limit cooldown for {Seconds}s.",
+                            Math.Ceiling(waitFor.TotalSeconds));
+                        await Task.Delay(waitFor, stoppingToken);
+                        continue;
+                    }
+
                     localSocket = new ClientWebSocket();
                     localSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
                     await localSocket.ConnectAsync(new Uri($"{BaseEndpoint}?token={token}"), stoppingToken);
@@ -175,6 +188,16 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
                 {
                     return;
                 }
+                catch (WebSocketException ex) when (IsRateLimitHandshake(ex))
+                {
+                    var rateLimitCooldownSeconds = Math.Max(30, options.RateLimitCooldownSeconds);
+                    _rateLimitedUntilUtc = DateTimeOffset.UtcNow.AddSeconds(rateLimitCooldownSeconds);
+                    skipBackoffWait = true;
+                    _logger.LogWarning(
+                        ex,
+                        "Finnhub websocket handshake rate-limited (429). Cooling down reconnects for {Seconds}s.",
+                        rateLimitCooldownSeconds);
+                }
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Finnhub websocket session failed.");
@@ -191,6 +214,11 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
                     {
                         localSocket.Dispose();
                     }
+                }
+
+                if (skipBackoffWait)
+                {
+                    continue;
                 }
 
                 Interlocked.Increment(ref _reconnectCount);
@@ -425,5 +453,10 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
         return string.IsNullOrWhiteSpace(symbol)
             ? string.Empty
             : symbol.Trim().ToUpperInvariant();
+    }
+
+    private static bool IsRateLimitHandshake(WebSocketException ex)
+    {
+        return ex.Message.Contains("429", StringComparison.Ordinal);
     }
 }
