@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { HubConnection, HubConnectionBuilder, HttpTransportType, LogLevel } from "@microsoft/signalr";
 import { FeedHeader } from "./components/feed/FeedHeader";
 import { FeedList } from "./components/feed/FeedList";
+import { TopOpportunity } from "./components/feed/TopOpportunity";
 import type { FeedFilter, FeedItem } from "./components/feed/types";
 import { getPriceRange } from "./components/feed/utils";
 import { FEED_HUB_URL, FEED_SIM_STATS_URL, FEED_SIM_URL, FEED_URL } from "./config/api";
@@ -325,6 +326,8 @@ function App() {
   const [autoScroll, setAutoScroll] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [simulationMode, setSimulationMode] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
+  const [rightPanelTab, setRightPanelTab] = useState<"watchlist" | "simulator">("watchlist");
   const connectionRef = useRef<HubConnection | null>(null);
   const itemsRef = useRef<FeedItem[]>([]);
   const feedContainerRef = useRef<HTMLDivElement | null>(null);
@@ -718,6 +721,43 @@ function App() {
     });
   }, [items, filter, nowMs]);
 
+  const topOpportunity = useMemo(
+    () => filtered.find((item) => item.isTopOpportunity) ?? filtered[0],
+    [filtered],
+  );
+
+  const watchlistSymbols = useMemo(() => {
+    const ranked = [...items].sort((a, b) => {
+      const bScore = b.score ?? b.activityScore;
+      const aScore = a.score ?? a.activityScore;
+      return bScore - aScore;
+    });
+
+    return ranked
+      .map((item) => item.symbol)
+      .filter((symbol, index, arr) => arr.indexOf(symbol) === index)
+      .slice(0, 8);
+  }, [items]);
+
+  const panelItems = useMemo(() => {
+    if (!focusMode) {
+      return filtered;
+    }
+
+    const focusSymbols = new Set<string>(watchlistSymbols.slice(0, 4));
+    if (topOpportunity?.symbol) {
+      focusSymbols.add(topOpportunity.symbol);
+    }
+
+    return filtered.filter((item) => focusSymbols.has(item.symbol));
+  }, [filtered, focusMode, topOpportunity, watchlistSymbols]);
+
+  const freshCount = useMemo(
+    () => items.filter((item) => getAgeSeconds(item, nowMs) <= 15).length,
+    [items, nowMs],
+  );
+  const staleCount = Math.max(0, items.length - freshCount);
+
   return (
     <main className="h-screen bg-[#0B0F14] text-white">
       <div className="mx-auto flex h-full max-w-[1800px] flex-col">
@@ -726,10 +766,12 @@ function App() {
           autoScroll={autoScroll}
           soundEnabled={soundEnabled}
           simulationMode={simulationMode}
+          focusMode={focusMode}
           onFilterChange={setFilter}
           onAutoScrollChange={setAutoScroll}
           onSoundEnabledChange={setSoundEnabled}
           onSimulationModeChange={setSimulationMode}
+          onFocusModeChange={setFocusMode}
           status={status}
           simulationStatsLabel={simulationStats
             ? `SIM ENG ${simulationStats.engineSignalsPerMinute}/m | FB ${simulationStats.fallbackSignalsPerMinute}/m | ${simulationStats.fallbackRatePercent.toFixed(0)}%`
@@ -740,8 +782,97 @@ function App() {
             Simulation mode active (market closed)
           </div>
         ) : null}
-        <div ref={feedContainerRef} className="min-h-0 flex-1 overflow-y-auto">
-          <FeedList items={filtered} nowMs={nowMs} />
+
+        <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 p-3 lg:grid-cols-12">
+          <section className="rounded border border-slate-800 bg-slate-950/70 p-3 lg:col-span-12">
+            <div className="mb-2 text-xs font-semibold tracking-wide text-slate-300">Market Pulse</div>
+            <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
+              <div className="rounded border border-slate-800 bg-slate-900/60 p-2">
+                <div className="text-[11px] text-slate-400">Status</div>
+                <div className={`text-sm font-semibold ${status === "live" ? "text-emerald-400" : status === "degraded" ? "text-amber-300" : "text-red-400"}`}>
+                  {status.toUpperCase()}
+                </div>
+              </div>
+              <div className="rounded border border-slate-800 bg-slate-900/60 p-2">
+                <div className="text-[11px] text-slate-400">Signals</div>
+                <div className="text-sm font-semibold text-slate-100">{panelItems.length}</div>
+              </div>
+              <div className="rounded border border-slate-800 bg-slate-900/60 p-2">
+                <div className="text-[11px] text-slate-400">Fresh</div>
+                <div className="text-sm font-semibold text-emerald-400">{freshCount}</div>
+              </div>
+              <div className="rounded border border-slate-800 bg-slate-900/60 p-2">
+                <div className="text-[11px] text-slate-400">Stale</div>
+                <div className="text-sm font-semibold text-amber-300">{staleCount}</div>
+              </div>
+              <div className="rounded border border-slate-800 bg-slate-900/60 p-2">
+                <div className="text-[11px] text-slate-400">Mode</div>
+                <div className="text-sm font-semibold text-slate-100">{focusMode ? "FOCUS" : "STANDARD"}</div>
+              </div>
+            </div>
+          </section>
+
+          <section className="min-h-0 rounded border border-slate-800 bg-slate-950/70 lg:col-span-4">
+            <div className="border-b border-slate-800 px-3 py-2 text-xs font-semibold tracking-wide text-slate-300">
+              Top Opportunity
+            </div>
+            <TopOpportunity item={topOpportunity} nowMs={nowMs} />
+          </section>
+
+          <section className="min-h-0 rounded border border-slate-800 bg-slate-950/70 lg:col-span-5">
+            <div className="border-b border-slate-800 px-3 py-2 text-xs font-semibold tracking-wide text-slate-300">
+              Live Signals
+            </div>
+            <div ref={feedContainerRef} className="h-[42vh] overflow-y-auto lg:h-[56vh]">
+              <FeedList items={panelItems} nowMs={nowMs} showTopOpportunity={false} />
+            </div>
+          </section>
+
+          <section className="min-h-0 rounded border border-slate-800 bg-slate-950/70 lg:col-span-3">
+            <div className="flex items-center border-b border-slate-800 px-3 py-2 text-xs font-semibold tracking-wide text-slate-300">
+              <button
+                type="button"
+                onClick={() => setRightPanelTab("watchlist")}
+                className={`mr-2 rounded px-2 py-1 ${rightPanelTab === "watchlist" ? "bg-slate-700 text-white" : "text-slate-400"}`}
+              >
+                Watchlist
+              </button>
+              <button
+                type="button"
+                onClick={() => setRightPanelTab("simulator")}
+                className={`rounded px-2 py-1 ${rightPanelTab === "simulator" ? "bg-slate-700 text-white" : "text-slate-400"}`}
+              >
+                Simulator
+              </button>
+            </div>
+            <div className="h-[42vh] overflow-y-auto p-3 text-sm lg:h-[56vh]">
+              {rightPanelTab === "watchlist" ? (
+                <ul className="space-y-2">
+                  {watchlistSymbols.map((symbol) => (
+                    <li key={symbol} className="rounded border border-slate-800 bg-slate-900/60 px-2 py-1.5">
+                      {symbol}
+                    </li>
+                  ))}
+                  {watchlistSymbols.length === 0 ? <li className="text-slate-400">No active watchlist symbols.</li> : null}
+                </ul>
+              ) : (
+                <div className="space-y-2 text-slate-200">
+                  <div className="rounded border border-slate-800 bg-slate-900/60 p-2">
+                    <div className="text-[11px] text-slate-400">Engine Signals/min</div>
+                    <div className="font-semibold">{simulationStats?.engineSignalsPerMinute ?? 0}</div>
+                  </div>
+                  <div className="rounded border border-slate-800 bg-slate-900/60 p-2">
+                    <div className="text-[11px] text-slate-400">Fallback Signals/min</div>
+                    <div className="font-semibold">{simulationStats?.fallbackSignalsPerMinute ?? 0}</div>
+                  </div>
+                  <div className="rounded border border-slate-800 bg-slate-900/60 p-2">
+                    <div className="text-[11px] text-slate-400">Fallback Rate</div>
+                    <div className="font-semibold">{(simulationStats?.fallbackRatePercent ?? 0).toFixed(1)}%</div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
         </div>
       </div>
     </main>

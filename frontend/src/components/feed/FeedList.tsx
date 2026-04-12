@@ -6,6 +6,7 @@ import type { FeedItem as FeedItemType } from "./types";
 interface FeedListProps {
   items: FeedItemType[];
   nowMs: number;
+  showTopOpportunity?: boolean;
 }
 
 const SIGNAL_EXPIRY_SECONDS = 75;
@@ -35,7 +36,7 @@ function getDecayedScore(item: FeedItemType, nowMs: number): number {
   return baseScore * (1 - (MAX_SCORE_DECAY * decayProgress));
 }
 
-export const FeedList = memo(function FeedList({ items, nowMs }: FeedListProps) {
+export const FeedList = memo(function FeedList({ items, nowMs, showTopOpportunity = true }: FeedListProps) {
   if (items.length === 0) {
     return (
       <div className="px-4 py-6 text-sm text-slate-400">
@@ -57,7 +58,9 @@ export const FeedList = memo(function FeedList({ items, nowMs }: FeedListProps) 
 
   return (
     <section aria-live="polite">
-      <TopOpportunity key={topOpportunity?.id ?? "no-top-opportunity"} item={topOpportunity} nowMs={nowMs} />
+      {showTopOpportunity ? (
+        <TopOpportunity key={topOpportunity?.id ?? "no-top-opportunity"} item={topOpportunity} nowMs={nowMs} />
+      ) : null}
       {highPriority.length > 0 ? (
         <div className="border-b border-slate-800/80 bg-slate-950/80">
           <div className="px-3 py-1.5 text-[11px] font-bold tracking-widest text-amber-300">
