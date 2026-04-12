@@ -1,37 +1,51 @@
-name: Build Check
+name: PR Quality Gate (dev)
 
 on:
   pull_request:
     branches:
-      - main
       - dev
 
+concurrency:
+  group: pr-quality-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  quality-gate:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-
-      - name: Build Backend
-        run: dotnet build backend/SignalFeed.Api/SignalFeed.Api.csproj --configuration Release
-
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 18
           cache: npm
           cache-dependency-path: signal-ui/package-lock.json
 
-      - name: Install Frontend Dependencies
+      - name: Frontend install
+        working-directory: signal-ui
         run: npm ci
-        working-directory: signal-ui
 
-      - name: Build Frontend
-        run: npm run build
+      - name: Frontend lint
         working-directory: signal-ui
+        run: npm run lint
+
+      - name: Frontend build
+        working-directory: signal-ui
+        run: npm run build
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Backend restore
+        run: dotnet restore Trading_Signal_App.sln
+
+      - name: Backend build
+        run: dotnet build Trading_Signal_App.sln --configuration Release --no-restore
+
+      - name: Backend tests
+        run: dotnet test Trading_Signal_App.sln --configuration Release --no-build --verbosity normal
