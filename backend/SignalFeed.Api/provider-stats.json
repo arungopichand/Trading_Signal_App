@@ -1,4 +1,39 @@
 {
-  "smoothedScores": {},
-  "providerStats": {}
+  "smoothedScores": {
+    "FinnhubService": -2311.7741317359582,
+    "PolygonService": -1270.7106859629992,
+    "FmpService": -639.5071627059498
+  },
+  "providerStats": {
+    "FinnhubService": {
+      "provider": "FinnhubService",
+      "totalCalls": 1428,
+      "successCalls": 1346,
+      "failedCalls": 82,
+      "rateLimitHits": 50,
+      "totalLatencyMs": 569617,
+      "successRate": 94.26,
+      "averageLatencyMs": 398.89
+    },
+    "PolygonService": {
+      "provider": "PolygonService",
+      "totalCalls": 91,
+      "successCalls": 0,
+      "failedCalls": 91,
+      "rateLimitHits": 18,
+      "totalLatencyMs": 930,
+      "successRate": 0,
+      "averageLatencyMs": 10.22
+    },
+    "FmpService": {
+      "provider": "FmpService",
+      "totalCalls": 91,
+      "successCalls": 0,
+      "failedCalls": 91,
+      "rateLimitHits": 0,
+      "totalLatencyMs": 517,
+      "successRate": 0,
+      "averageLatencyMs": 5.68
+    }
+  }
 }

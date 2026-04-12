@@ -25,5 +25,13 @@ public class QuoteResponse
     [JsonPropertyName("t")]
     public long Timestamp { get; set; }
 
+    public DateTimeOffset? TradeTimeUtc { get; set; }
+
+    public DateTimeOffset? ReceivedAtUtc { get; set; }
+
     public string Provider { get; set; } = string.Empty;
+
+    public int AgeSeconds { get; set; }
+
+    public bool IsStale { get; set; }
 }

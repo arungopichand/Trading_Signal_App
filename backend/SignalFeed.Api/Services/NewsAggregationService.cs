@@ -86,17 +86,42 @@ public sealed class NewsAggregationService
         CancellationToken cancellationToken = default)
     {
         var output = new List<NormalizedNewsItem>();
+        var symbolSet = symbols
+            .Where(symbol => !string.IsNullOrWhiteSpace(symbol))
+            .Select(symbol => symbol.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.Ordinal)
+            .Take(20)
+            .ToHashSet(StringComparer.Ordinal);
 
-        foreach (var symbol in symbols.Distinct(StringComparer.Ordinal).Take(20))
+        if (symbolSet.Count == 0)
+        {
+            return output;
+        }
+
+        var globalArticles = await _newsApiService.GetGlobalMarketArticlesAsync(20, cancellationToken);
+        foreach (var article in globalArticles)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var item = await GetLatestNewsAsync(symbol, cancellationToken);
-            if (item is null)
+            var headline = article.Title?.Trim() ?? string.Empty;
+            var summary = article.Description?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(headline) && string.IsNullOrWhiteSpace(summary))
             {
                 continue;
             }
 
-            output.Add(item);
+            var text = $"{headline} {summary}".ToUpperInvariant();
+            var matchedSymbol = symbolSet.FirstOrDefault(symbol => text.Contains(symbol, StringComparison.Ordinal));
+            if (string.IsNullOrWhiteSpace(matchedSymbol))
+            {
+                continue;
+            }
+
+            var normalized = Normalize(matchedSymbol, article);
+            output.Add(normalized);
+            if (output.Count >= 8)
+            {
+                break;
+            }
         }
 
         if (output.Count > 0)

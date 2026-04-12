@@ -11,15 +11,21 @@ public sealed class HealthController : ControllerBase
     private readonly ApiUsageTracker _apiUsageTracker;
     private readonly ApiKeyStatusProvider _apiKeyStatusProvider;
     private readonly IConfiguration _configuration;
+    private readonly FeedService _feedService;
+    private readonly MarketDataService _marketDataService;
 
     public HealthController(
         ApiUsageTracker apiUsageTracker,
         ApiKeyStatusProvider apiKeyStatusProvider,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        FeedService feedService,
+        MarketDataService marketDataService)
     {
         _apiUsageTracker = apiUsageTracker;
         _apiKeyStatusProvider = apiKeyStatusProvider;
         _configuration = configuration;
+        _feedService = feedService;
+        _marketDataService = marketDataService;
     }
 
     [HttpGet]
@@ -27,6 +33,10 @@ public sealed class HealthController : ControllerBase
     {
         var usage = _apiUsageTracker.GetUsageSnapshot();
         var keys = _apiKeyStatusProvider.GetKeyStatus(_configuration);
+        var scanner = SignalBackgroundService.GetRuntimeSnapshot();
+        var feed = _feedService.GetRuntimeDiagnostics();
+        var symbolSources = _feedService.GetSourceDiagnostics(200);
+        var marketData = _marketDataService.GetHealthMetrics();
 
         return Ok(new
         {
@@ -36,9 +46,14 @@ public sealed class HealthController : ControllerBase
                 baseUrl = string.IsNullOrWhiteSpace(item.BaseUrl) ? null : item.BaseUrl,
                 calls = item.Calls,
                 success = item.Success,
-                failures = item.Failures
+                failures = item.Failures,
+                rateLimitHits = item.RateLimitHits
             }),
             keys,
+            scanner,
+            feed,
+            symbolSources,
+            marketData,
             timestamp = DateTimeOffset.UtcNow
         });
     }

@@ -67,19 +67,16 @@ public sealed class FmpService : IQuoteProvider
             return null;
         }
 
-        var profileTask = GetProfileAsync(normalizedSymbol, apiKey, cancellationToken);
-        var floatTask = GetFloatSharesAsync(normalizedSymbol, apiKey, cancellationToken);
-        var instTask = GetInstitutionalOwnershipAsync(normalizedSymbol, apiKey, cancellationToken);
-        await Task.WhenAll(profileTask, floatTask, instTask);
-
+        // Free-tier safe: use only profile endpoint to avoid premium/403 endpoints.
+        var marketCap = await GetProfileAsync(normalizedSymbol, apiKey, cancellationToken);
         var factors = new FmpFactors
         {
-            MarketCap = profileTask.Result,
-            FloatShares = floatTask.Result,
-            InstitutionalOwnership = instTask.Result
+            MarketCap = marketCap,
+            FloatShares = null,
+            InstitutionalOwnership = null
         };
 
-        if (factors.MarketCap is null && factors.FloatShares is null && factors.InstitutionalOwnership is null)
+        if (factors.MarketCap is null)
         {
             RegisterFailure(null, "factors-empty", normalizedSymbol);
             return null;

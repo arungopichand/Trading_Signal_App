@@ -19,9 +19,9 @@ public sealed class FeedController : ControllerBase
     }
 
     [HttpGet]
-    public ActionResult<IReadOnlyList<FeedItem>> GetFeed()
+    public ActionResult<IReadOnlyList<FeedItem>> GetFeed([FromQuery] int? limit = null)
     {
-        return Ok(_feedService.GetLatest());
+        return Ok(_feedService.GetLatest(limit ?? 100));
     }
 
     [HttpGet("simulate")]

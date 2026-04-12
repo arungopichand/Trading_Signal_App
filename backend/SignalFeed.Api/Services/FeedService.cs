@@ -12,36 +12,61 @@ public sealed class FeedService
     private const decimal MaxScoreDecay = 0.55m;
     private static readonly TimeSpan SymbolReemitWindow = TimeSpan.FromSeconds(30);
     private const decimal SymbolScoreJumpThreshold = 25m;
-    private static readonly TimeSpan EmitSpacing = TimeSpan.FromMilliseconds(650);
     private static readonly TimeSpan TrendingWindow = TimeSpan.FromMinutes(5);
     private const int TrendingThreshold = 3;
+    private readonly TimeSpan _emitSpacing;
+    private readonly TimeSpan _liveFreshWindow;
+    private readonly TimeSpan _pollingFreshWindow;
+    private readonly TimeSpan _batchWindow;
+    private readonly int _maxBatchSize;
+    private readonly bool _allowPollingWhileLiveFresh;
     private readonly IHubContext<FeedHub> _hubContext;
     private readonly ILogger<FeedService> _logger;
     private readonly List<FeedItem> _items = [];
     private readonly HashSet<string> _fingerprints = [];
     private readonly Dictionary<string, (DateTimeOffset EmittedAt, decimal Score, string SignalType)> _lastEmittedBySymbol = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Queue<DateTimeOffset>> _emissionHistoryBySymbol = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, SymbolSourceState> _sourceStateBySymbol = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, FeedItem> _pendingBroadcastBySymbol = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, SourcePathMetrics> _sourcePathMetrics = new(StringComparer.Ordinal);
     private readonly object _gate = new();
     private DateTimeOffset _lastRealInsertAt = DateTimeOffset.MinValue;
     private DateTimeOffset _nextEmitSlot = DateTimeOffset.MinValue;
+    private DateTimeOffset _nextBatchFlushAt = DateTimeOffset.MinValue;
+    private bool _batchDispatchRunning;
+    private long _broadcastCount;
+    private long _suppressedCount;
+    private long _deduplicatedCount;
+    private long _staleDroppedCount;
+    private long _totalBroadcastLatencyMs;
+    private long _maxBroadcastLatencyMs;
+    private long _sourceSwitchCount;
 
-    public FeedService(IHubContext<FeedHub> hubContext, ILogger<FeedService> logger)
+    public FeedService(IHubContext<FeedHub> hubContext, IConfiguration configuration, ILogger<FeedService> logger)
     {
         _hubContext = hubContext;
+        var emitSpacingMs = Math.Clamp(configuration.GetValue<int?>("Feed:EmitSpacingMs") ?? 120, 30, 1000);
+        _emitSpacing = TimeSpan.FromMilliseconds(emitSpacingMs);
+        _liveFreshWindow = TimeSpan.FromSeconds(Math.Clamp(configuration.GetValue<int?>("Feed:LiveFreshSeconds") ?? 12, 2, 120));
+        _pollingFreshWindow = TimeSpan.FromSeconds(Math.Clamp(configuration.GetValue<int?>("Feed:PollingFreshSeconds") ?? 20, 3, 180));
+        _batchWindow = TimeSpan.FromMilliseconds(Math.Clamp(configuration.GetValue<int?>("Feed:BatchWindowMs") ?? 120, 20, 1000));
+        _maxBatchSize = Math.Clamp(configuration.GetValue<int?>("Feed:MaxBatchSize") ?? 50, 1, 500);
+        _allowPollingWhileLiveFresh = configuration.GetValue<bool?>("Feed:AllowPollingWhileLiveFresh") ?? false;
         _logger = logger;
     }
 
-    public IReadOnlyList<FeedItem> GetLatest()
+    public IReadOnlyList<FeedItem> GetLatest(int limit = MaxItems)
     {
         lock (_gate)
         {
             var now = DateTimeOffset.UtcNow;
+            var safeLimit = Math.Clamp(limit, 1, MaxItems);
             PruneExpiredItems(now);
             return _items
                 .OrderByDescending(item => item.IsTopOpportunity)
                 .ThenByDescending(item => GetDecayedScore(item, now))
                 .ThenByDescending(item => item.Timestamp)
-                .Take(MaxItems)
+                .Take(safeLimit)
                 .ToList();
         }
     }
@@ -188,16 +213,30 @@ public sealed class FeedService
         item.Sentiment = NormalizeSentiment(item.Sentiment);
         item.NewsCategory = NormalizeNewsCategory(item.NewsCategory);
         item.RepeatCount = Math.Max(0, item.RepeatCount);
+        var sourcePath = ResolveSourcePath(item.Source, item.SignalType);
         var fingerprint = BuildFingerprint(item);
         var wasInserted = false;
         var totalItems = 0;
-        var emitDelay = TimeSpan.Zero;
+        var shouldStartDispatcher = false;
 
         lock (_gate)
         {
-            PruneExpiredItems(DateTimeOffset.UtcNow);
+            var now = DateTimeOffset.UtcNow;
+            PruneExpiredItems(now);
 
-            if (_lastEmittedBySymbol.TryGetValue(item.Symbol, out var lastEmission))
+            if (!TryApplySourcePolicy(item, sourcePath, now, out var dropReason))
+            {
+                Interlocked.Increment(ref _staleDroppedCount);
+                _logger.LogDebug(
+                    "FeedService dropped {Symbol} from {SourcePath}. Reason={Reason}",
+                    item.Symbol,
+                    sourcePath,
+                    dropReason);
+                return;
+            }
+
+            if (sourcePath != FeedSourcePath.Live &&
+                _lastEmittedBySymbol.TryGetValue(item.Symbol, out var lastEmission))
             {
                 var withinQuietWindow = item.Timestamp - lastEmission.EmittedAt < SymbolReemitWindow;
                 var scoreIncrease = item.Score - lastEmission.Score;
@@ -209,6 +248,7 @@ public sealed class FeedService
                         item.Symbol,
                         SymbolReemitWindow.TotalSeconds,
                         scoreIncrease);
+                    Interlocked.Increment(ref _suppressedCount);
                     return;
                 }
             }
@@ -216,6 +256,7 @@ public sealed class FeedService
             if (!_fingerprints.Add(fingerprint))
             {
                 _logger.LogInformation("FeedService deduplicated item for {Symbol} ({SignalType}).", item.Symbol, item.SignalType);
+                Interlocked.Increment(ref _deduplicatedCount);
                 return;
             }
 
@@ -245,10 +286,23 @@ public sealed class FeedService
             }
 
             _lastRealInsertAt = DateTimeOffset.UtcNow;
-            var now = DateTimeOffset.UtcNow;
-            var slot = _nextEmitSlot > now ? _nextEmitSlot : now;
-            emitDelay = slot - now;
-            _nextEmitSlot = slot + EmitSpacing;
+            if (!_pendingBroadcastBySymbol.TryGetValue(item.Symbol, out var pendingExisting) ||
+                item.Timestamp >= pendingExisting.Timestamp ||
+                item.Score >= pendingExisting.Score)
+            {
+                _pendingBroadcastBySymbol[item.Symbol] = item;
+            }
+
+            if (!_batchDispatchRunning)
+            {
+                _batchDispatchRunning = true;
+                _nextBatchFlushAt = now + _batchWindow;
+                shouldStartDispatcher = true;
+            }
+            else if (_pendingBroadcastBySymbol.Count >= _maxBatchSize)
+            {
+                _nextBatchFlushAt = now;
+            }
 
             totalItems = _items.Count;
             wasInserted = true;
@@ -259,32 +313,148 @@ public sealed class FeedService
             return;
         }
 
-        try
-        {
-            if (emitDelay > TimeSpan.Zero)
-            {
-                await Task.Delay(emitDelay, cancellationToken);
-            }
+        _logger.LogInformation(
+            "FeedService added item: Symbol={Symbol}, Type={SignalType}, Source={Source}, Path={SourcePath}, TotalItems={TotalItems}.",
+            item.Symbol,
+            item.SignalType,
+            item.Source,
+            sourcePath,
+            totalItems);
 
-            _logger.LogInformation(
-                "FeedService added item: Symbol={Symbol}, Type={SignalType}, Source={Source}, TotalItems={TotalItems}.",
-                item.Symbol,
-                item.SignalType,
-                item.Source,
-                totalItems);
-            await _hubContext.Clients.All.SendAsync("newSignal", item, cancellationToken);
-            _logger.LogInformation("FeedService broadcasted newSignal for {Symbol}.", item.Symbol);
-        }
-        catch (Exception ex)
+        if (shouldStartDispatcher)
         {
-            _logger.LogDebug(ex, "SignalR broadcast failed for {Symbol}.", item.Symbol);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await ProcessBroadcastQueueAsync(CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "FeedService broadcast dispatcher failed.");
+                    lock (_gate)
+                    {
+                        _batchDispatchRunning = false;
+                    }
+                }
+            }, CancellationToken.None);
         }
     }
 
     private static string BuildFingerprint(FeedItem item)
     {
-        var timeBucket = item.Timestamp.ToUnixTimeSeconds() / 30;
-        return $"{item.Symbol}|{item.SignalType}|{item.Headline}|{timeBucket}";
+        var sourcePath = ResolveSourcePath(item.Source, item.SignalType);
+        var bucketSeconds = sourcePath == FeedSourcePath.Live ? 2 : 30;
+        var timeBucket = item.Timestamp.ToUnixTimeSeconds() / bucketSeconds;
+        var quantizedPrice = Math.Round(item.Price, sourcePath == FeedSourcePath.Live ? 4 : 2);
+        var quantizedChange = Math.Round(item.ChangePercent, 2);
+        return $"{item.Symbol}|{item.SignalType}|{sourcePath}|{quantizedPrice}|{quantizedChange}|{timeBucket}";
+    }
+
+    private static FeedSourcePath ResolveSourcePath(string source, string signalType)
+    {
+        if (string.Equals(signalType, "NEWS", StringComparison.OrdinalIgnoreCase))
+        {
+            return FeedSourcePath.News;
+        }
+
+        var normalized = source?.Trim().ToUpperInvariant() ?? string.Empty;
+        if (normalized.Contains("TAPE", StringComparison.Ordinal) ||
+            normalized.Contains("WS", StringComparison.Ordinal) ||
+            normalized.Contains("WEBSOCKET", StringComparison.Ordinal))
+        {
+            return FeedSourcePath.Live;
+        }
+
+        if (normalized.Contains("SIM", StringComparison.Ordinal))
+        {
+            return FeedSourcePath.Simulation;
+        }
+
+        return FeedSourcePath.Polling;
+    }
+
+    private bool TryApplySourcePolicy(FeedItem item, FeedSourcePath sourcePath, DateTimeOffset now, out string reason)
+    {
+        reason = "accepted";
+        if (!_sourceStateBySymbol.TryGetValue(item.Symbol, out var state))
+        {
+            state = new SymbolSourceState { Symbol = item.Symbol };
+            _sourceStateBySymbol[item.Symbol] = state;
+        }
+
+        if (sourcePath == FeedSourcePath.Live)
+        {
+            if (state.LastWebsocketUpdateAt.HasValue && item.Timestamp < state.LastWebsocketUpdateAt.Value)
+            {
+                reason = "older_than_last_websocket";
+                state.DroppedOutOfOrderCount++;
+                return false;
+            }
+
+            state.LastWebsocketUpdateAt = item.Timestamp;
+            state.LiveHealthy = true;
+            return PromoteActiveSource(state, sourcePath, item.Timestamp, ref reason);
+        }
+
+        if (sourcePath == FeedSourcePath.Polling)
+        {
+            if (state.LastPollingUpdateAt.HasValue && item.Timestamp < state.LastPollingUpdateAt.Value)
+            {
+                reason = "older_than_last_polling";
+                state.DroppedOutOfOrderCount++;
+                return false;
+            }
+
+            if (state.LastWebsocketUpdateAt.HasValue)
+            {
+                var websocketAge = now - state.LastWebsocketUpdateAt.Value;
+                var websocketIsFresh = websocketAge <= _liveFreshWindow;
+                if (websocketIsFresh && !_allowPollingWhileLiveFresh)
+                {
+                    reason = "live_source_fresh";
+                    state.DroppedStalePollingCount++;
+                    return false;
+                }
+
+                if (item.Timestamp <= state.LastWebsocketUpdateAt.Value && !_allowPollingWhileLiveFresh)
+                {
+                    reason = "polling_older_than_websocket";
+                    state.DroppedStalePollingCount++;
+                    return false;
+                }
+            }
+
+            state.LastPollingUpdateAt = item.Timestamp;
+            state.PollingHealthy = true;
+            return PromoteActiveSource(state, sourcePath, item.Timestamp, ref reason);
+        }
+
+        // NEWS/SIM updates should not force source ownership changes for market data.
+        if (sourcePath == FeedSourcePath.News)
+        {
+            state.LastNewsUpdateAt = item.Timestamp;
+        }
+        else if (sourcePath == FeedSourcePath.Simulation)
+        {
+            state.LastSimulationUpdateAt = item.Timestamp;
+        }
+
+        return true;
+    }
+
+    private bool PromoteActiveSource(SymbolSourceState state, FeedSourcePath sourcePath, DateTimeOffset timestamp, ref string reason)
+    {
+        if (state.ActiveSource != sourcePath)
+        {
+            state.ActiveSource = sourcePath;
+            state.LastSourceSwitchAt = timestamp;
+            state.SourceSwitchCount++;
+            Interlocked.Increment(ref _sourceSwitchCount);
+            reason = "source_promoted";
+        }
+
+        return true;
     }
 
     private static string NormalizeSignalType(string signalType)
@@ -393,4 +563,314 @@ public sealed class FeedService
         var decayFactor = 1m - (MaxScoreDecay * bounded);
         return Math.Round(baseScore * decayFactor, 2);
     }
+
+    public FeedRuntimeDiagnostics GetRuntimeDiagnostics()
+    {
+        var broadcasts = Interlocked.Read(ref _broadcastCount);
+        var totalLatency = Interlocked.Read(ref _totalBroadcastLatencyMs);
+        var averageLatency = broadcasts > 0 ? totalLatency / (double)broadcasts : 0d;
+        int pendingQueue;
+        int trackedSymbols;
+        Dictionary<string, SourcePathMetricsSnapshot> sourcePathMetrics;
+        lock (_gate)
+        {
+            pendingQueue = _pendingBroadcastBySymbol.Count;
+            trackedSymbols = _sourceStateBySymbol.Count;
+            sourcePathMetrics = _sourcePathMetrics
+                .ToDictionary(
+                    pair => pair.Key,
+                    pair => new SourcePathMetricsSnapshot
+                    {
+                        Count = pair.Value.Count,
+                        AverageLatencyMs = pair.Value.Count > 0
+                            ? Math.Round(pair.Value.TotalLatencyMs / (double)pair.Value.Count, 2)
+                            : 0d,
+                        MaxLatencyMs = pair.Value.MaxLatencyMs
+                    },
+                    StringComparer.Ordinal);
+        }
+
+        return new FeedRuntimeDiagnostics
+        {
+            BroadcastCount = broadcasts,
+            SuppressedCount = Interlocked.Read(ref _suppressedCount),
+            DeduplicatedCount = Interlocked.Read(ref _deduplicatedCount),
+            StaleDroppedCount = Interlocked.Read(ref _staleDroppedCount),
+            AverageBroadcastLatencyMs = Math.Round(averageLatency, 2),
+            MaxBroadcastLatencyMs = Interlocked.Read(ref _maxBroadcastLatencyMs),
+            EmitSpacingMs = (int)_emitSpacing.TotalMilliseconds,
+            BatchWindowMs = (int)_batchWindow.TotalMilliseconds,
+            MaxBatchSize = _maxBatchSize,
+            PendingBroadcastQueue = pendingQueue,
+            TrackedSymbols = trackedSymbols,
+            SourceSwitchCount = Interlocked.Read(ref _sourceSwitchCount),
+            SourcePathMetrics = sourcePathMetrics
+        };
+    }
+
+    public IReadOnlyList<SymbolSourceDiagnostics> GetSourceDiagnostics(int maxSymbols = 100)
+    {
+        var now = DateTimeOffset.UtcNow;
+        lock (_gate)
+        {
+            return _sourceStateBySymbol.Values
+                .OrderByDescending(state => state.LastSourceSwitchAt ?? DateTimeOffset.MinValue)
+                .ThenBy(state => state.Symbol, StringComparer.Ordinal)
+                .Take(Math.Clamp(maxSymbols, 1, 1000))
+                .Select(state => new SymbolSourceDiagnostics
+                {
+                    Symbol = state.Symbol,
+                    ActiveSource = state.ActiveSource.ToString().ToUpperInvariant(),
+                    LastWebsocketUpdateAt = state.LastWebsocketUpdateAt,
+                    LastPollingUpdateAt = state.LastPollingUpdateAt,
+                    LastNewsUpdateAt = state.LastNewsUpdateAt,
+                    LiveFreshAgeMs = state.LastWebsocketUpdateAt.HasValue
+                        ? Math.Max(0, (long)(now - state.LastWebsocketUpdateAt.Value).TotalMilliseconds)
+                        : null,
+                    PollingFreshAgeMs = state.LastPollingUpdateAt.HasValue
+                        ? Math.Max(0, (long)(now - state.LastPollingUpdateAt.Value).TotalMilliseconds)
+                        : null,
+                    LiveHealthy = state.LastWebsocketUpdateAt.HasValue &&
+                                  now - state.LastWebsocketUpdateAt.Value <= _liveFreshWindow,
+                    PollingHealthy = state.LastPollingUpdateAt.HasValue &&
+                                     now - state.LastPollingUpdateAt.Value <= _pollingFreshWindow,
+                    SourceSwitchCount = state.SourceSwitchCount,
+                    LastSourceSwitchAt = state.LastSourceSwitchAt,
+                    DroppedStalePollingCount = state.DroppedStalePollingCount,
+                    DroppedOutOfOrderCount = state.DroppedOutOfOrderCount
+                })
+                .ToList();
+        }
+    }
+
+    private void UpdateMaxBroadcastLatency(long latencyMs)
+    {
+        while (true)
+        {
+            var current = Interlocked.Read(ref _maxBroadcastLatencyMs);
+            if (latencyMs <= current)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref _maxBroadcastLatencyMs, latencyMs, current) == current)
+            {
+                return;
+            }
+        }
+    }
+
+    private async Task ProcessBroadcastQueueAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            List<FeedItem> batch;
+            TimeSpan delay;
+            lock (_gate)
+            {
+                if (_pendingBroadcastBySymbol.Count == 0)
+                {
+                    _batchDispatchRunning = false;
+                    _nextBatchFlushAt = DateTimeOffset.MinValue;
+                    return;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                var dueAt = _nextBatchFlushAt == DateTimeOffset.MinValue ? now : _nextBatchFlushAt;
+                delay = dueAt > now ? dueAt - now : TimeSpan.Zero;
+                if (delay > TimeSpan.Zero)
+                {
+                    batch = [];
+                }
+                else
+                {
+                    batch = _pendingBroadcastBySymbol.Values
+                        .OrderByDescending(item => item.Timestamp)
+                        .ThenByDescending(item => item.Score)
+                        .Take(_maxBatchSize)
+                        .ToList();
+
+                    foreach (var item in batch)
+                    {
+                        _pendingBroadcastBySymbol.Remove(item.Symbol);
+                    }
+
+                    _nextBatchFlushAt = DateTimeOffset.UtcNow + _batchWindow;
+                }
+            }
+
+            if (delay > TimeSpan.Zero)
+            {
+                await Task.Delay(delay, cancellationToken);
+                continue;
+            }
+
+            if (batch.Count == 0)
+            {
+                continue;
+            }
+
+            try
+            {
+                var now = DateTimeOffset.UtcNow;
+                if (batch.Count == 1)
+                {
+                    var item = batch[0];
+                    await _hubContext.Clients.All.SendAsync("newSignal", item, cancellationToken);
+                    RecordBroadcastLatency(item, now);
+                }
+                else
+                {
+                    await _hubContext.Clients.All.SendAsync("newSignals", batch, cancellationToken);
+                    foreach (var item in batch)
+                    {
+                        RecordBroadcastLatency(item, now);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "SignalR batch broadcast failed for {Count} items.", batch.Count);
+            }
+
+            if (_emitSpacing > TimeSpan.Zero)
+            {
+                await Task.Delay(_emitSpacing, cancellationToken);
+            }
+        }
+    }
+
+    private void RecordBroadcastLatency(FeedItem item, DateTimeOffset now)
+    {
+        Interlocked.Increment(ref _broadcastCount);
+        var latencyMs = Math.Max(0, (long)(now - item.Timestamp).TotalMilliseconds);
+        Interlocked.Add(ref _totalBroadcastLatencyMs, latencyMs);
+        UpdateMaxBroadcastLatency(latencyMs);
+
+        var sourcePath = ResolveSourcePath(item.Source, item.SignalType).ToString().ToUpperInvariant();
+        lock (_gate)
+        {
+            if (!_sourcePathMetrics.TryGetValue(sourcePath, out var metrics))
+            {
+                metrics = new SourcePathMetrics();
+                _sourcePathMetrics[sourcePath] = metrics;
+            }
+
+            metrics.Count++;
+            metrics.TotalLatencyMs += latencyMs;
+            metrics.MaxLatencyMs = Math.Max(metrics.MaxLatencyMs, latencyMs);
+        }
+    }
+}
+
+public sealed class FeedRuntimeDiagnostics
+{
+    public long BroadcastCount { get; set; }
+
+    public long SuppressedCount { get; set; }
+
+    public long DeduplicatedCount { get; set; }
+
+    public long StaleDroppedCount { get; set; }
+
+    public double AverageBroadcastLatencyMs { get; set; }
+
+    public long MaxBroadcastLatencyMs { get; set; }
+
+    public int EmitSpacingMs { get; set; }
+
+    public int BatchWindowMs { get; set; }
+
+    public int MaxBatchSize { get; set; }
+
+    public int PendingBroadcastQueue { get; set; }
+
+    public int TrackedSymbols { get; set; }
+
+    public long SourceSwitchCount { get; set; }
+
+    public IReadOnlyDictionary<string, SourcePathMetricsSnapshot> SourcePathMetrics { get; set; } =
+        new Dictionary<string, SourcePathMetricsSnapshot>(StringComparer.Ordinal);
+}
+
+public sealed class SymbolSourceDiagnostics
+{
+    public string Symbol { get; set; } = string.Empty;
+
+    public string ActiveSource { get; set; } = "POLLING";
+
+    public DateTimeOffset? LastWebsocketUpdateAt { get; set; }
+
+    public DateTimeOffset? LastPollingUpdateAt { get; set; }
+
+    public DateTimeOffset? LastNewsUpdateAt { get; set; }
+
+    public long? LiveFreshAgeMs { get; set; }
+
+    public long? PollingFreshAgeMs { get; set; }
+
+    public bool LiveHealthy { get; set; }
+
+    public bool PollingHealthy { get; set; }
+
+    public int SourceSwitchCount { get; set; }
+
+    public DateTimeOffset? LastSourceSwitchAt { get; set; }
+
+    public long DroppedStalePollingCount { get; set; }
+
+    public long DroppedOutOfOrderCount { get; set; }
+}
+
+public sealed class SourcePathMetricsSnapshot
+{
+    public long Count { get; set; }
+
+    public double AverageLatencyMs { get; set; }
+
+    public long MaxLatencyMs { get; set; }
+}
+
+internal sealed class SourcePathMetrics
+{
+    public long Count { get; set; }
+
+    public long TotalLatencyMs { get; set; }
+
+    public long MaxLatencyMs { get; set; }
+}
+
+internal sealed class SymbolSourceState
+{
+    public string Symbol { get; set; } = string.Empty;
+
+    public FeedSourcePath ActiveSource { get; set; } = FeedSourcePath.Polling;
+
+    public DateTimeOffset? LastWebsocketUpdateAt { get; set; }
+
+    public DateTimeOffset? LastPollingUpdateAt { get; set; }
+
+    public DateTimeOffset? LastNewsUpdateAt { get; set; }
+
+    public DateTimeOffset? LastSimulationUpdateAt { get; set; }
+
+    public bool LiveHealthy { get; set; }
+
+    public bool PollingHealthy { get; set; }
+
+    public int SourceSwitchCount { get; set; }
+
+    public DateTimeOffset? LastSourceSwitchAt { get; set; }
+
+    public long DroppedStalePollingCount { get; set; }
+
+    public long DroppedOutOfOrderCount { get; set; }
+}
+
+internal enum FeedSourcePath
+{
+    Live = 0,
+    Polling = 1,
+    News = 2,
+    Simulation = 3
 }

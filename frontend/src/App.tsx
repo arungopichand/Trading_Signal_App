@@ -28,6 +28,9 @@ const SIM_HEADLINES = [
 ];
 const SIM_SOURCES = ["Reuters", "Bloomberg", "CNBC", "Benzinga", "The Fly"];
 const SIM_FLAGS = ["HIGH_CTB", "REG_SHO", "R_S", "HALT", "OFFERING", "FDA"];
+const INCOMING_FLUSH_MS = 120;
+
+const requestCache = new Map<string, { expiresAt: number; promise: Promise<unknown> }>();
 
 function randomRange(min: number, max: number): number {
   return min + (Math.random() * (max - min));
@@ -222,9 +225,43 @@ function createLocalSimItem(forceStrong: boolean, existingItems: FeedItem[]): Fe
   };
 }
 
-function mergeNewItem(items: FeedItem[], item: FeedItem): FeedItem[] {
-  const next = [item, ...items.filter((existing) => existing.id !== item.id)];
-  return next.slice(0, MAX_ITEMS);
+function mergeIncomingBatch(items: FeedItem[], incomingBatch: FeedItem[]): FeedItem[] {
+  if (incomingBatch.length === 0) {
+    return items;
+  }
+
+  const seen = new Set<string>();
+  const incoming: FeedItem[] = [];
+  for (const item of incomingBatch) {
+    if (seen.has(item.id)) {
+      continue;
+    }
+
+    seen.add(item.id);
+    incoming.push(item);
+  }
+
+  const existing = items.filter((item) => !seen.has(item.id));
+  return [...incoming, ...existing].slice(0, MAX_ITEMS);
+}
+
+async function fetchJsonWithTtl(url: string, ttlMs: number): Promise<unknown> {
+  const now = Date.now();
+  const cached = requestCache.get(url);
+  if (cached && cached.expiresAt > now) {
+    return cached.promise;
+  }
+
+  const promise = fetch(url, { headers: { Accept: "application/json" } }).then(async (response) => {
+    if (!response.ok) {
+      throw new Error(`Request failed: ${response.status}`);
+    }
+
+    return response.json();
+  });
+
+  requestCache.set(url, { expiresAt: now + ttlMs, promise });
+  return promise;
 }
 
 function getAgeSeconds(item: FeedItem, nowMs: number): number {
@@ -296,6 +333,8 @@ function App() {
   const hasUserInteractedRef = useRef(false);
   const soundEnabledRef = useRef(soundEnabled);
   const simLastStrongAtRef = useRef(0);
+  const incomingQueueRef = useRef<FeedItem[]>([]);
+  const incomingFlushTimerRef = useRef<number | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [simulationStats, setSimulationStats] = useState<SimulationStats | null>(null);
 
@@ -374,10 +413,35 @@ function App() {
     lastSoundTimeRef.current = now;
   };
 
-  const pushIncomingSignal = (item: FeedItem) => {
-    setItems((current) => mergeNewItem(current, item));
+  const flushIncomingSignals = () => {
+    incomingFlushTimerRef.current = null;
+    const batch = incomingQueueRef.current;
+    if (batch.length === 0) {
+      return;
+    }
+
+    incomingQueueRef.current = [];
+    setItems((current) => mergeIncomingBatch(current, batch));
     setStatus("live");
-    playSignalAudio(item);
+
+    for (const item of batch) {
+      playSignalAudio(item);
+    }
+  };
+
+  const enqueueIncomingSignals = (signals: FeedItem[]) => {
+    if (signals.length === 0) {
+      return;
+    }
+
+    incomingQueueRef.current.push(...signals);
+    if (incomingFlushTimerRef.current === null) {
+      incomingFlushTimerRef.current = window.setTimeout(flushIncomingSignals, INCOMING_FLUSH_MS);
+    }
+  };
+
+  const pushIncomingSignal = (item: FeedItem) => {
+    enqueueIncomingSignals([item]);
   };
 
   useEffect(() => {
@@ -385,16 +449,7 @@ function App() {
 
     const loadInitial = async () => {
       try {
-        const response = await fetch(FEED_URL, {
-          headers: { Accept: "application/json" },
-          cache: "no-store",
-        });
-
-        if (!response.ok) {
-          throw new Error(`Feed API returned ${response.status}`);
-        }
-
-        const payload = (await response.json()) as unknown;
+        const payload = await fetchJsonWithTtl(`${FEED_URL}?limit=60`, 2_000);
         const normalized = Array.isArray(payload)
           ? payload.map(normalizeFeedItem).filter(Boolean) as FeedItem[]
           : [];
@@ -412,13 +467,16 @@ function App() {
     void loadInitial();
     return () => {
       isMounted = false;
+      if (incomingFlushTimerRef.current !== null) {
+        window.clearTimeout(incomingFlushTimerRef.current);
+      }
     };
   }, []);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
       setNowMs(Date.now());
-    }, 1000);
+    }, 1500);
 
     return () => {
       window.clearInterval(interval);
@@ -431,7 +489,6 @@ function App() {
       return;
     }
 
-    console.log("Connecting to SignalR...", FEED_HUB_URL);
     let disposed = false;
     let retryTimer: number | null = null;
 
@@ -441,7 +498,7 @@ function App() {
         transport: HttpTransportType.WebSockets,
       })
       .withAutomaticReconnect()
-      .configureLogging(LogLevel.Information)
+      .configureLogging(LogLevel.Warning)
       .build();
 
     connectionRef.current = connection;
@@ -452,22 +509,33 @@ function App() {
         return;
       }
 
-      console.log("LIVE:", normalized);
       pushIncomingSignal(normalized);
     });
 
+    connection.on("newSignals", (messages: unknown) => {
+      if (!Array.isArray(messages)) {
+        return;
+      }
+
+      const normalizedBatch = messages
+        .map(normalizeFeedItem)
+        .filter(Boolean) as FeedItem[];
+      if (normalizedBatch.length === 0) {
+        return;
+      }
+
+      enqueueIncomingSignals(normalizedBatch);
+    });
+
     connection.onreconnected(() => {
-      console.log("SignalR reconnected.");
       setStatus("live");
     });
 
     connection.onreconnecting(() => {
-      console.log("SignalR reconnecting...");
       setStatus("degraded");
     });
 
     connection.onclose(() => {
-      console.log("SignalR closed.");
       setStatus("offline");
     });
 
@@ -478,10 +546,9 @@ function App() {
         }
 
         await connection.start();
-        console.log("Connected!");
         setStatus("live");
       } catch (error) {
-        console.error("SignalR connection failed.", error);
+        console.warn("SignalR connection failed.", error);
         setStatus("offline");
         retryTimer = window.setTimeout(() => {
           void startConnection();
@@ -543,9 +610,7 @@ function App() {
             incoming.push(createLocalSimItem(forceStrong && incoming.length === 0, itemsRef.current));
           }
 
-          for (const item of incoming) {
-            pushIncomingSignal(item);
-          }
+          enqueueIncomingSignals(incoming);
         }
       } catch {
         if (!cancelled) {
@@ -557,9 +622,12 @@ function App() {
           }
 
           const fallbackCount = Math.floor(randomRange(2, 4.99));
+          const fallbackItems: FeedItem[] = [];
           for (let index = 0; index < fallbackCount; index += 1) {
-            pushIncomingSignal(createLocalSimItem(forceStrong && index === 0, itemsRef.current));
+            fallbackItems.push(createLocalSimItem(forceStrong && index === 0, itemsRef.current));
           }
+
+          enqueueIncomingSignals(fallbackItems);
         }
       } finally {
         inFlight = false;
@@ -585,15 +653,7 @@ function App() {
     let cancelled = false;
     const pullStats = async () => {
       try {
-        const response = await fetch(FEED_SIM_STATS_URL, {
-          headers: { Accept: "application/json" },
-          cache: "no-store",
-        });
-        if (!response.ok) {
-          throw new Error(`Simulation stats API returned ${response.status}`);
-        }
-
-        const payload = await response.json() as Partial<SimulationStats>;
+        const payload = await fetchJsonWithTtl(FEED_SIM_STATS_URL, 1_500) as Partial<SimulationStats>;
         if (!cancelled) {
           setSimulationStats({
             engineSignalsPerMinute: Number(payload.engineSignalsPerMinute ?? 0),

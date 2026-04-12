@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { FeedItem } from "./FeedItem";
 import { TopOpportunity } from "./TopOpportunity";
 import type { FeedItem as FeedItemType } from "./types";
@@ -34,7 +35,7 @@ function getDecayedScore(item: FeedItemType, nowMs: number): number {
   return baseScore * (1 - (MAX_SCORE_DECAY * decayProgress));
 }
 
-export function FeedList({ items, nowMs }: FeedListProps) {
+export const FeedList = memo(function FeedList({ items, nowMs }: FeedListProps) {
   if (items.length === 0) {
     return (
       <div className="px-4 py-6 text-sm text-slate-400">
@@ -72,4 +73,4 @@ export function FeedList({ items, nowMs }: FeedListProps) {
       ))}
     </section>
   );
-}
+});

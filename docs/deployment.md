@@ -1,61 +1,56 @@
 # Deployment Guide
 
 ## Environments
-- **Staging**: branch `dev`
-- **Production**: branch `main`
+- **Staging**: `dev`
+- **Production**: `main`
+
+## Architecture
+- Frontend on Vercel from `frontend/`
+- Backend on Render from `backend/SignalFeed.Api`
+- Supabase used by backend only for privileged database access
 
 ## Frontend (Vercel)
-### Mapping
-- `main` -> Production deployment
-- `dev` -> Preview deployment
-
-### Required GitHub Secrets
-- `VERCEL_TOKEN`
-- `VERCEL_ORG_ID`
-- `VERCEL_PROJECT_ID`
-
-### Required Vercel Environment Variables
+### Required variables
 - `VITE_API_BASE_URL`
-- `VITE_SIGNALR_HUB_URL`
-
-Set in Vercel per environment:
-1. Preview values for staging backend URL
-2. Production values for production backend URL
+- `VITE_SUPABASE_URL`
+- `VITE_SUPABASE_ANON_KEY`
 
 ## Backend (Render)
-### Services
-- `trading-backend-staging` bound to `dev`
-- `trading-backend-prod` bound to `main`
-
-### Required GitHub Secrets
-- `RENDER_STAGING_DEPLOY_HOOK_URL`
-- `RENDER_PRODUCTION_DEPLOY_HOOK_URL`
-
-### Backend Env Vars (Render)
+### Required variables
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_KEY`
+- `CORS_ALLOWED_ORIGINS`
 - `FINNHUB__APIKEY`
 - `POLYGON__APIKEY`
 - `NEWSAPI__APIKEY`
 - `FMP__APIKEY`
-- `SUPABASE_URL`
-- `SUPABASE_KEY`
-- `CORS_ALLOWED_ORIGINS`
 
-## CI/CD Trigger Rules
-1. PR to `dev`: quality gate only.
-2. Push/merge to `dev`: deploy staging.
-3. Push/merge to `main`: deploy production.
+### Startup controls
+- `ENABLE_SIGNAL_SCANNER=true`
+- `ENABLE_UNIVERSE_REFRESH=true`
+- `ENABLE_REALTIME_STREAM=false`
 
-## Rollback
-### Vercel
-1. Open Vercel project deployments.
-2. Promote previous healthy deployment to production.
+### Commands
+- Build: `dotnet publish -c Release -o out`
+- Start: `dotnet out/SignalFeed.Api.dll`
 
-### Render
-1. Open Render service events.
-2. Roll back to last successful deploy.
-3. If needed, trigger deploy hook for a known-good commit.
+## CI/CD
+Only these workflows exist:
+- `.github/workflows/dev-deploy.yml`
+- `.github/workflows/prod-deploy.yml`
 
-### Git
-1. Revert bad commit on environment branch:
-   - `git revert <commit_sha>`
-2. Push revert and let pipeline redeploy.
+Both workflows:
+- detect changed paths
+- skip unnecessary builds
+- deploy only impacted components
+
+## Supabase migration secrets
+- `SUPABASE_ACCESS_TOKEN`
+- `SUPABASE_DEV_PROJECT_REF`
+- `SUPABASE_DEV_DB_PASSWORD`
+- `SUPABASE_PROD_PROJECT_REF`
+- `SUPABASE_PROD_DB_PASSWORD`
+
+## Branch strategy
+- `feature/* -> dev -> main`
+- no direct push to `dev` or `main` (enforce through GitHub branch protection)

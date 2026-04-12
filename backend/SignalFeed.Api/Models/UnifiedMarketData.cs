@@ -25,4 +25,14 @@ public sealed class UnifiedMarketData
     public string PriceSource { get; set; } = "FINNHUB";
 
     public string VolumeSource { get; set; } = "FINNHUB";
+
+    public string SourceProvider { get; set; } = "FINNHUB";
+
+    public bool IsCached { get; set; }
+
+    public bool IsFallback { get; set; }
+
+    public int DataAgeSeconds { get; set; }
+
+    public bool IsStale { get; set; }
 }

@@ -1,60 +1,60 @@
 # Trading Signal App
 
-Real-time stock intelligence platform with multi-source market data, confluence signal scoring, and live feed delivery.
-
-## Stack
-- Backend: ASP.NET Core (.NET 10), SignalR
-- Frontend: React, Vite, Tailwind
-- Market Data: Finnhub, Polygon, NewsAPI, Financial Modeling Prep
-- Deployments: Render (backend), Vercel (frontend)
-- CI/CD: GitHub Actions
+Real-time stock intelligence platform with a clean split deployment architecture:
+- Frontend (`/frontend`) on Vercel
+- Backend (`/backend/SignalFeed.Api`) on Render
+- Database/Auth on Supabase
 
 ## Repository Layout
 ```text
 root/
-├── docs/
-├── src/
-│   ├── backend/
-│   ├── frontend/
-│   └── shared/
-├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── e2e/
-├── backend/            # active backend code
-├── signal-ui/          # active frontend code
-├── .github/workflows/
-├── .env.example
-├── README.md
-└── CONTRIBUTING.md
+|-- frontend/
+|-- backend/SignalFeed.Api/
+|-- .github/workflows/
+|-- docs/
+|-- .env.example
+|-- render.yaml
+|-- Trading_Signal_App.sln
 ```
 
-## Quick Start (Local)
-1. Copy `.env.example` to `.env` and fill keys.
-2. Run backend:
+## Branching Model
+- `feature/*` -> `dev` -> `main`
+- `dev` = development environment
+- `main` = production environment
+
+## CI/CD Workflows
+Only two workflows are used:
+- `.github/workflows/dev-deploy.yml` on push to `dev`
+- `.github/workflows/prod-deploy.yml` on push to `main`
+
+Each workflow:
+- detects changed areas (frontend/backend/supabase)
+- builds only changed parts
+- deploys only changed parts
+
+## Local Setup
+1. Copy `.env.example` to `.env` and fill values.
+2. Backend:
    - `dotnet restore Trading_Signal_App.sln`
    - `dotnet run --project backend/SignalFeed.Api/SignalFeed.Api.csproj`
-3. Run frontend:
-   - `cd signal-ui`
+3. Frontend:
+   - `cd frontend`
    - `npm ci`
    - `npm run dev`
 
-## Branching Model
-- `main`: production
-- `dev`: active integration branch
-- `feature/<name>`: new features
-- `bugfix/<name>`: non-urgent fixes
-- `hotfix/<name>`: urgent production fixes
-
-Flow: `feature/* -> dev -> main`
-
-## CI/CD
-- PR to `dev`: lint + build + test quality gate.
-- Push/Merge to `dev`: staging deployment (Vercel preview + Render staging).
-- Push/Merge to `main`: production deployment (Vercel production + Render production).
+## Required Secrets (GitHub Actions)
+- `VERCEL_TOKEN`
+- `VERCEL_ORG_ID`
+- `VERCEL_PROJECT_ID`
+- `RENDER_STAGING_DEPLOY_HOOK_URL`
+- `RENDER_PRODUCTION_DEPLOY_HOOK_URL`
+- `SUPABASE_ACCESS_TOKEN`
+- `SUPABASE_DEV_PROJECT_REF`
+- `SUPABASE_DEV_DB_PASSWORD`
+- `SUPABASE_PROD_PROJECT_REF`
+- `SUPABASE_PROD_DB_PASSWORD`
 
 ## Documentation
-- [Project docs](docs/README.md)
+- [Deployment](docs/deployment.md)
 - [Architecture](docs/architecture.md)
 - [API](docs/api.md)
-- [Deployment](docs/deployment.md)

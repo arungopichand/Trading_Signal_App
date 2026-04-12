@@ -9,11 +9,13 @@ namespace SignalFeed.Api.Services;
 public sealed class FinnhubRealtimeStreamService : BackgroundService
 {
     private static readonly Uri WsEndpoint = new("wss://ws.finnhub.io");
+    private static readonly TimeSpan SymbolEmitCooldown = TimeSpan.FromMilliseconds(750);
     private readonly FinnhubService _finnhubService;
     private readonly FeedService _feedService;
     private readonly SymbolUniverseService _symbolUniverseService;
     private readonly ILogger<FinnhubRealtimeStreamService> _logger;
     private readonly Dictionary<string, decimal> _lastTradeBySymbol = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTimeOffset> _lastEmitBySymbol = new(StringComparer.Ordinal);
     private readonly HashSet<string> _subscribed = [];
     private int _subscriptionOffset;
 
@@ -75,7 +77,7 @@ public sealed class FinnhubRealtimeStreamService : BackgroundService
             var message = await ReceiveMessageAsync(socket, receiveBuffer, cancellationToken);
             if (!string.IsNullOrWhiteSpace(message))
             {
-                _logger.LogInformation("Finnhub websocket message: {Message}", message);
+                _logger.LogDebug("Finnhub websocket message received.");
                 await ProcessSocketMessageAsync(message, cancellationToken);
             }
 
@@ -156,12 +158,19 @@ public sealed class FinnhubRealtimeStreamService : BackgroundService
                 continue;
             }
 
+            var now = DateTimeOffset.UtcNow;
+            if (_lastEmitBySymbol.TryGetValue(symbol, out var lastEmitAt) && now - lastEmitAt < SymbolEmitCooldown)
+            {
+                continue;
+            }
+
             var type = change >= 2m ? "SPIKE" : change > 0 ? "BULLISH" : "BEARISH";
             var score = Math.Round(Math.Abs(change) * 15m + Math.Min(40m, volume / 500m), 2);
             if (score < 60m)
             {
                 continue;
             }
+            _lastEmitBySymbol[symbol] = now;
 
             var item = new FeedItem
             {
@@ -181,10 +190,10 @@ public sealed class FinnhubRealtimeStreamService : BackgroundService
                 GapPercent = null,
                 NewsCategory = string.Empty,
                 RepeatCount = 1,
-                MomentumDetectedAt = DateTimeOffset.UtcNow,
+                MomentumDetectedAt = now,
                 Headline = $"Tape move {change:+0.##;-0.##;0}% on {volume:0} shares.",
                 Reason = $"Realtime tape momentum + volume burst ({volume:0} shares)",
-                Timestamp = DateTimeOffset.UtcNow,
+                Timestamp = now,
                 Source = "TAPE"
             };
 

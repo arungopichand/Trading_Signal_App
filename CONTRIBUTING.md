@@ -1,42 +1,31 @@
 # Contributing Guide
 
-## Branch Rules
-1. Never commit directly to `main`.
-2. Never push feature work directly to `dev`.
-3. Always branch from `dev`:
-   - `feature/<name>`
-   - `bugfix/<name>`
-   - `hotfix/<name>`
+## Branch Strategy
+- `main` -> production
+- `dev` -> development
+- `feature/*` -> feature branches
 
-## Development Flow
-1. `git switch dev`
-2. `git pull --ff-only origin dev`
-3. `git switch -c feature/<short-name>`
-4. Commit in small, reviewable chunks.
-5. Open PR into `dev`.
-6. Wait for CI checks and at least 1 approval.
-7. Merge using squash or merge commit.
+## Pull Request Rules
+1. `feature/*` branches must target `dev`.
+2. `dev` promotion must go through a PR into `main`.
+3. CI must pass before merge.
+4. Do not merge if tests fail.
 
-## Pull Request Requirements
-1. PR template completed (scope, risk, test notes).
-2. CI checks must pass:
-   - frontend lint/build
-   - backend build/test
-3. At least one reviewer approval.
-4. No secrets in code or logs.
+## Required GitHub Branch Protection
+1. Block direct pushes to `main`.
+2. Block direct pushes to `dev`.
+3. Require pull request reviews.
+4. Require status checks to pass:
+   - `Build and Test / frontend`
+   - `Build and Test / backend`
 
-## Commit Style
-- Use imperative tense:
-  - `Add market cache bypass for top opportunity`
-  - `Fix deduplication threshold comparison`
-
-## Testing Expectations
-- Run locally before PR:
-  - `dotnet build Trading_Signal_App.sln`
-  - `dotnet test Trading_Signal_App.sln`
-  - `cd signal-ui && npm ci && npm run lint && npm run build`
+## Local Validation
+- `dotnet restore Trading_Signal_App.sln`
+- `dotnet build Trading_Signal_App.sln -c Release`
+- `dotnet test backend/SignalFeed.Tests/SignalFeed.Tests.csproj -c Release`
+- `cd frontend && npm ci && npm run lint && npm run build`
 
 ## Security Rules
-1. Never commit `.env`, API keys, or hook URLs.
-2. Store secrets only in GitHub/Vercel/Render secret stores.
-3. Rotate leaked keys immediately.
+1. Never commit secrets or `.env` files.
+2. Keep privileged keys in GitHub/Render/Vercel secret stores only.
+3. Rotate leaked credentials immediately.

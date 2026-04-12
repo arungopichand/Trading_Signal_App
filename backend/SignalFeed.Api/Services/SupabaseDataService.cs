@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -12,6 +13,7 @@ public class SupabaseDataService
     {
         PropertyNameCaseInsensitive = true
     };
+    private const int SymbolQueryLimit = 500;
 
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _configuration;
@@ -108,7 +110,7 @@ public class SupabaseDataService
         }
 
         var activeFilter = activeOnly ? "&is_active=eq.true" : string.Empty;
-        var url = $"{baseUrl}/rest/v1/tracked_symbols?select=id,symbol,is_active,created_at{activeFilter}&order=symbol.asc";
+        var url = $"{baseUrl}/rest/v1/tracked_symbols?select=id,symbol,is_active,created_at{activeFilter}&order=symbol.asc&limit={SymbolQueryLimit}";
 
         using var response = await SendAsync(HttpMethod.Get, url, apiKey, null, cancellationToken);
 
@@ -147,7 +149,22 @@ public class SupabaseDataService
             request.Content = new StringContent(json, Encoding.UTF8, "application/json");
         }
 
-        return await _httpClient.SendAsync(request, cancellationToken);
+        var sw = Stopwatch.StartNew();
+        var response = await _httpClient.SendAsync(request, cancellationToken);
+        sw.Stop();
+
+        if (sw.ElapsedMilliseconds > 300)
+        {
+            var endpoint = Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.AbsolutePath : url;
+            _logger.LogWarning(
+                "SLOW_SUPABASE_QUERY {Method} {Endpoint} -> {StatusCode} in {ElapsedMs}ms",
+                method.Method,
+                endpoint,
+                (int)response.StatusCode,
+                sw.ElapsedMilliseconds);
+        }
+
+        return response;
     }
 
     private bool TryGetSupabaseSettings(out string baseUrl, out string apiKey)
@@ -158,15 +175,9 @@ public class SupabaseDataService
             ?? _configuration["Supabase:Url"]
             ?? string.Empty).TrimEnd('/');
         apiKey =
-            Environment.GetEnvironmentVariable("SUPABASE_KEY")
-            ?? Environment.GetEnvironmentVariable("SUPABASE_SERVICE_ROLE_KEY")
-            ?? Environment.GetEnvironmentVariable("SUPABASE_ANON_KEY")
-            ?? _configuration["SUPABASE_KEY"]
-            ?? _configuration["Supabase:Key"]
-            ?? _configuration["SUPABASE_SERVICE_ROLE_KEY"]
-            ?? _configuration["Supabase:ServiceRoleKey"]
-            ?? _configuration["SUPABASE_ANON_KEY"]
-            ?? _configuration["Supabase:AnonKey"]
+            Environment.GetEnvironmentVariable("SUPABASE_SERVICE_KEY")
+            ?? _configuration["SUPABASE_SERVICE_KEY"]
+            ?? _configuration["Supabase:ServiceKey"]
             ?? string.Empty;
 
         if (string.IsNullOrWhiteSpace(baseUrl) || string.IsNullOrWhiteSpace(apiKey))

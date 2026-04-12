@@ -170,27 +170,20 @@ public sealed class PolygonService : IQuoteProvider
     public async Task<QuoteResponse?> GetQuoteAsync(string symbol, CancellationToken cancellationToken = default)
     {
         var normalizedSymbol = symbol.Trim().ToUpperInvariant();
-        var snapshotTask = GetSnapshotAsync(normalizedSymbol, cancellationToken);
-        var previousTask = GetPreviousAggregateAsync(normalizedSymbol, cancellationToken);
-        await Task.WhenAll(snapshotTask, previousTask);
-
-        var snapshot = snapshotTask.Result;
-        var previous = previousTask.Result;
-        if (snapshot is null)
+        // Free-tier safe fallback: use only previous aggregate endpoint.
+        var previous = await GetPreviousAggregateAsync(normalizedSymbol, cancellationToken);
+        if (previous is null)
         {
             return null;
         }
 
-        var price = snapshot.LastTrade?.Price ?? snapshot.Day?.Close ?? 0m;
+        var price = previous.Close;
         if (price <= 0m)
         {
             return null;
         }
 
-        var changePercent = snapshot.TodaysChangePercent;
-        var previousClose = changePercent is not null
-            ? price / (1m + (changePercent.Value / 100m))
-            : previous?.Close ?? 0m;
+        var previousClose = previous.Open > 0m ? previous.Open : previous.Close;
         if (previousClose <= 0m)
         {
             previousClose = price;
@@ -200,10 +193,10 @@ public sealed class PolygonService : IQuoteProvider
         {
             CurrentPrice = Math.Round(price, 2),
             PreviousClose = Math.Round(previousClose, 2),
-            OpenPrice = Math.Round(snapshot.Day?.Open ?? previous?.Open ?? previousClose, 2),
-            High = Math.Round(snapshot.Day?.High ?? previous?.High ?? price, 2),
-            Low = Math.Round(snapshot.Day?.Low ?? previous?.Low ?? price, 2),
-            Volume = Math.Round(snapshot.Day?.Volume ?? previous?.Volume ?? 0m, 0),
+            OpenPrice = Math.Round(previous.Open > 0m ? previous.Open : previousClose, 2),
+            High = Math.Round(previous.High > 0m ? previous.High : price, 2),
+            Low = Math.Round(previous.Low > 0m ? previous.Low : price, 2),
+            Volume = Math.Round(previous.Volume > 0m ? previous.Volume : 0m, 0),
             Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
             Provider = nameof(PolygonService)
         };

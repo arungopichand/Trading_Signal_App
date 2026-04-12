@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Caching.Memory;
 using SignalFeed.Api.Models;
 
 namespace SignalFeed.Api.Services;
@@ -18,6 +19,8 @@ public sealed class SignalEngine
 
     private readonly IMarketDataService _marketDataService;
     private readonly SymbolUniverseService _symbolUniverseService;
+    private readonly SupabaseDataService _supabaseDataService;
+    private readonly IMemoryCache _cache;
     private readonly ILogger<SignalEngine> _logger;
     private readonly decimal _volumeSpikeThreshold;
     private readonly decimal _dedupScoreThreshold;
@@ -32,16 +35,20 @@ public sealed class SignalEngine
     public SignalEngine(
         IMarketDataService marketDataService,
         SymbolUniverseService symbolUniverseService,
+        SupabaseDataService supabaseDataService,
+        IMemoryCache cache,
         IConfiguration configuration,
         ILogger<SignalEngine> logger)
     {
         _marketDataService = marketDataService;
         _symbolUniverseService = symbolUniverseService;
+        _supabaseDataService = supabaseDataService;
+        _cache = cache;
         _logger = logger;
         _volumeSpikeThreshold = Math.Max(100_000m, configuration.GetValue<decimal?>("Scanner:VolumeSpikeThreshold") ?? 500_000m);
         _dedupScoreThreshold = Math.Max(1m, configuration.GetValue<decimal?>("Scanner:DedupScoreThreshold") ?? 10m);
         _scanWindowSize = Math.Clamp(configuration.GetValue<int?>("Scanner:CycleSymbolCount") ?? DefaultScanWindowSize, 10, 15);
-        _maxParallelScans = Math.Clamp(configuration.GetValue<int?>("Scanner:MaxParallelSymbols") ?? 6, 5, 10);
+        _maxParallelScans = Math.Clamp(configuration.GetValue<int?>("Scanner:MaxParallelSymbols") ?? 3, 2, 10);
         _allowClosedMarketScan = configuration.GetValue<bool?>("Scanner:AllowClosedMarketScan") ?? true;
     }
 
@@ -76,7 +83,8 @@ public sealed class SignalEngine
             };
         }
 
-        var scanSet = BuildScanSet(universe, now);
+        var watchlist = await GetWatchlistSymbolsAsync(cancellationToken);
+        var scanSet = BuildScanSet(universe, watchlist, now);
         using var semaphore = new SemaphoreSlim(_maxParallelScans, _maxParallelScans);
         var symbolTasks = scanSet.Select(async symbol =>
         {
@@ -462,7 +470,7 @@ public sealed class SignalEngine
         return values.Count(value => value);
     }
 
-    private List<string> BuildScanSet(IReadOnlyList<string> universe, DateTimeOffset now)
+    private List<string> BuildScanSet(IReadOnlyList<string> universe, IReadOnlyCollection<string> watchlist, DateTimeOffset now)
     {
         if (universe.Count <= _scanWindowSize)
         {
@@ -472,8 +480,12 @@ public sealed class SignalEngine
         var universeSet = new HashSet<string>(universe, StringComparer.Ordinal);
         var selected = new List<string>(_scanWindowSize);
         var selectedSet = new HashSet<string>(StringComparer.Ordinal);
+        var ranked = BuildPriorityScores(universe, watchlist, now)
+            .OrderByDescending(pair => pair.Value)
+            .Select(pair => pair.Key)
+            .ToList();
 
-        foreach (var symbol in GetPrioritizedSymbols(now))
+        foreach (var symbol in ranked)
         {
             if (!universeSet.Contains(symbol))
             {
@@ -507,6 +519,78 @@ public sealed class SignalEngine
         }
 
         return selected;
+    }
+
+    private Dictionary<string, decimal> BuildPriorityScores(
+        IReadOnlyList<string> universe,
+        IReadOnlyCollection<string> watchlist,
+        DateTimeOffset now)
+    {
+        var scores = universe.ToDictionary(symbol => symbol, _ => 0m, StringComparer.Ordinal);
+
+        var prioritized = GetPrioritizedSymbols(now).ToList();
+        for (var i = 0; i < prioritized.Count; i++)
+        {
+            var symbol = prioritized[i];
+            if (!scores.ContainsKey(symbol))
+            {
+                continue;
+            }
+
+            // Recency score: higher for most recent signal activity.
+            scores[symbol] += 120m - Math.Min(100m, i * 10m);
+        }
+
+        foreach (var signal in SignalBackgroundService.CachedSignals.Take(30))
+        {
+            if (!scores.ContainsKey(signal.Symbol))
+            {
+                continue;
+            }
+
+            // Volatility + recent signal quality proxy.
+            scores[signal.Symbol] += Math.Abs(signal.ChangePercent) * 8m;
+            scores[signal.Symbol] += (signal.Score / 4m);
+            scores[signal.Symbol] += Math.Max(0m, signal.VolumeRatio ?? 0m) * 10m;
+        }
+
+        foreach (var symbol in watchlist)
+        {
+            if (scores.ContainsKey(symbol))
+            {
+                scores[symbol] += 80m;
+            }
+        }
+
+        return scores;
+    }
+
+    private async Task<IReadOnlyCollection<string>> GetWatchlistSymbolsAsync(CancellationToken cancellationToken)
+    {
+        const string cacheKey = "scanner:watchlist:active";
+        if (_cache.TryGetValue<IReadOnlyCollection<string>>(cacheKey, out var cached) && cached is not null)
+        {
+            return cached;
+        }
+
+        try
+        {
+            var symbols = await _supabaseDataService.GetActiveSymbolsAsync(cancellationToken);
+            var output = symbols
+                .Select(symbol => symbol.Symbol.Trim().ToUpperInvariant())
+                .Where(symbol => !string.IsNullOrWhiteSpace(symbol))
+                .Distinct(StringComparer.Ordinal)
+                .Take(40)
+                .ToList();
+
+            _cache.Set(cacheKey, output, TimeSpan.FromMinutes(2));
+            return output;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Watchlist refresh failed. Continuing without watchlist boost.");
+            return Array.Empty<string>();
+        }
     }
 
     private IReadOnlyList<StockSignal> ApplyDeduplication(IReadOnlyList<StockSignal> signals, DateTimeOffset now)

@@ -70,15 +70,53 @@ public sealed class ExternalNewsApiService
         var q = Uri.EscapeDataString($"{normalizedSymbol} stock");
         var requestUri = $"v2/everything?q={q}&language=en&sortBy=publishedAt&pageSize={boundedPageSize}&apiKey={Uri.EscapeDataString(apiKey)}";
 
+        return await ExecuteRequestAsync(requestUri, normalizedSymbol, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<NewsApiArticle>> GetGlobalMarketArticlesAsync(
+        int pageSize = 20,
+        CancellationToken cancellationToken = default)
+    {
+        if (IsTemporarilyDisabled(out var disabledFor))
+        {
+            _logger.LogInformation(
+                "NewsAPI temporarily disabled for {Seconds}s. Skipping global fetch.",
+                Math.Ceiling(disabledFor.TotalSeconds));
+            return [];
+        }
+
+        var apiKey = _configuration["NEWSAPI__APIKEY"] ?? _configuration["NewsApi:ApiKey"];
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            if (Interlocked.Exchange(ref _missingKeyWarningLogged, 1) == 0)
+            {
+                _logger.LogWarning("NEWSAPI__APIKEY missing. Global news will be skipped.");
+            }
+
+            return [];
+        }
+
+        var boundedPageSize = Math.Clamp(pageSize, 5, 30);
+        var q = Uri.EscapeDataString("stock market OR equities OR wall street");
+        var requestUri = $"v2/everything?q={q}&language=en&sortBy=publishedAt&pageSize={boundedPageSize}&apiKey={Uri.EscapeDataString(apiKey)}";
+
+        return await ExecuteRequestAsync(requestUri, "GLOBAL", cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<NewsApiArticle>> ExecuteRequestAsync(
+        string requestUri,
+        string context,
+        CancellationToken cancellationToken)
+    {
         try
         {
             using var response = await _httpClient.GetAsync(requestUri, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                RegisterFailure(response.StatusCode, normalizedSymbol);
+                RegisterFailure(response.StatusCode, context);
                 _logger.LogWarning(
-                    "NewsAPI request failed for {Symbol} with status code {StatusCode}. Falling back to Finnhub news.",
-                    normalizedSymbol,
+                    "NewsAPI request failed for {Context} with status code {StatusCode}.",
+                    context,
                     (int)response.StatusCode);
                 return [];
             }
@@ -87,10 +125,10 @@ public sealed class ExternalNewsApiService
             var payload = await JsonSerializer.DeserializeAsync<NewsApiResponse>(stream, JsonOptions, cancellationToken);
             if (payload is null || !string.Equals(payload.Status, "ok", StringComparison.OrdinalIgnoreCase))
             {
-                RegisterFailure(null, normalizedSymbol);
+                RegisterFailure(null, context);
                 _logger.LogWarning(
-                    "NewsAPI returned a non-ok payload for {Symbol}. Status={Status} Code={Code}. Falling back to Finnhub news.",
-                    normalizedSymbol,
+                    "NewsAPI returned a non-ok payload for {Context}. Status={Status} Code={Code}.",
+                    context,
                     payload?.Status ?? "null",
                     payload?.Code ?? "null");
                 return [];
@@ -104,8 +142,8 @@ public sealed class ExternalNewsApiService
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException)
         {
-            RegisterFailure(null, normalizedSymbol);
-            _logger.LogWarning(ex, "NewsAPI fetch failed for {Symbol}. Falling back to Finnhub news.", normalizedSymbol);
+            RegisterFailure(null, context);
+            _logger.LogWarning(ex, "NewsAPI fetch failed for {Context}.", context);
             return [];
         }
     }

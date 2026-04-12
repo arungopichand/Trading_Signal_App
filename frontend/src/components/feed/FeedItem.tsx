@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { FeedItem as FeedItemType } from "./types";
 import { FeedItemFactors } from "./FeedItemFactors";
 import { FeedItemFlags } from "./FeedItemFlags";
@@ -10,7 +11,7 @@ interface FeedItemProps {
   nowMs: number;
 }
 
-export function FeedItem({ item, nowMs }: FeedItemProps) {
+export const FeedItem = memo(function FeedItem({ item, nowMs }: FeedItemProps) {
   const score = item.score ?? item.activityScore;
   const isStrong = score > 90;
   const isVeryStrong = score > 120;
@@ -38,4 +39,4 @@ export function FeedItem({ item, nowMs }: FeedItemProps) {
       </div>
     </article>
   );
-}
+});

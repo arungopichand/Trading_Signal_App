@@ -1,94 +1,87 @@
-# Auto-Deployment Setup
+# Deployment Guide
 
-## Target Flow
+## Architecture
+- Frontend: Vercel (`frontend/`)
+- Backend: Render (`backend/SignalFeed.Api`)
+- Data/Auth: Supabase
 
-- Push to `dev`:
-  - GitHub Actions runs CI build checks
-  - Vercel creates a preview deployment
-- Push to `main`:
-  - GitHub Actions runs CI build checks
-  - Vercel deploys production frontend
-  - Render deploys production backend
+Flow: `Frontend (Vercel) -> Backend API (Render) -> Supabase`
 
-After one-time platform setup, no manual deploy commands are needed.
+## CI/CD Workflows
 
-## Repository Layout
+### 1. PR Validation
+- File: `.github/workflows/build.yml`
+- Trigger: `pull_request` to `dev` or `main`
+- Actions:
+  - Build frontend with Node 22
+  - Lint frontend
+  - Build backend with .NET
+  - Run backend tests
 
-- Backend: `backend/SignalFeed.Api`
-- Frontend: `signal-ui`
+### 2. Development Deploy
+- File: `.github/workflows/dev-deploy.yml`
+- Trigger: `push` to `dev`
+- Actions:
+  - Build frontend + backend
+  - Run tests (fail-fast)
+  - Deploy frontend preview to Vercel
+  - Trigger backend dev deploy on Render
+  - Run backend dev health check
 
-## Branch Model
+### 3. Production Deploy
+- File: `.github/workflows/deploy.yml`
+- Trigger: `push` to `main`
+- Actions:
+  - Build frontend + backend
+  - Run tests (fail-fast)
+  - Deploy frontend to Vercel
+  - Trigger backend deploy on Render
+  - Run backend health check
 
-- `main`: production
-- `dev`: development/preview
+Pipeline fails if any build/test/deploy/health step fails.
 
-## GitHub Actions
+## Required GitHub Secrets
 
-Workflow files:
-
-- `.github/workflows/deploy.yml` (CI/CD + deploy + backend health self-heal)
-- `.github/workflows/redeploy.yml` (auto-retry when CI/CD fails)
-
-- Triggers on push to `main` and `dev`
-- Builds frontend (`signal-ui`)
-- Builds backend (`backend/SignalFeed.Api`)
-- On `main` pushes:
-  - Deploys frontend to Vercel (if `VERCEL_TOKEN` is set)
-  - Triggers Render deploy hook (if `RENDER_DEPLOY_HOOK_URL` is set)
-  - Verifies backend `/health` and auto-retriggers Render deploy once if unhealthy
-- On `dev` pushes:
-  - Deploys frontend preview to Vercel (if `VERCEL_TOKEN` is set)
-
-Required GitHub repository secrets:
-
+### Vercel
 - `VERCEL_TOKEN`
-- `VERCEL_DEPLOY_HOOK_URL`
-- `RENDER_DEPLOY_HOOK_URL`
-- `RENDER_HEALTHCHECK_URL` (recommended, e.g. `https://trading-backend-cq8w.onrender.com/health`)
+- `VERCEL_ORG_ID`
+- `VERCEL_PROJECT_ID`
 
-## Vercel (Frontend)
+### Render
+- `RENDER_DEPLOY_HOOK`
+- `RENDER_DEV_DEPLOY_HOOK`
 
-Project configuration:
+### Health Verification
+- `BACKEND_HEALTHCHECK_URL`
+  - Example: `https://your-backend-service.onrender.com`
+  - Workflow checks: `${BACKEND_HEALTHCHECK_URL}/health`
+- `BACKEND_DEV_HEALTHCHECK_URL`
+  - Example: `https://your-dev-backend-service.onrender.com`
+  - Workflow checks: `${BACKEND_DEV_HEALTHCHECK_URL}/health`
 
-1. Import this repository in Vercel.
-2. Set Root Directory to `signal-ui`.
-3. Framework preset: `Vite`.
-4. Production branch: `main`.
-5. Preview branch flow: `dev` pushes generate preview deployments.
-6. Keep Vercel Git integration connected (for native previews) even though `main` is also deployed by GitHub Actions.
+## Deploy Commands Used in CI
 
-Environment variables (Production + Preview):
+### Frontend
+```bash
+npx vercel deploy --prod --yes --token "$VERCEL_TOKEN"
+```
 
-- `VITE_API_BASE_URL=https://your-api.onrender.com`
-- `VITE_SIGNALR_HUB_URL=https://your-api.onrender.com/hubs/feed`
+### Backend
+```bash
+curl --fail -X POST "$RENDER_DEPLOY_HOOK"
+```
 
-`signal-ui/vercel.json` already includes Vite build/output settings.
+### Health Check
+```bash
+curl --fail --show-error --silent "$BACKEND_HEALTHCHECK_URL/health"
+```
 
-## Render (Backend)
+## Render Service Runtime
+- Build command: `dotnet publish -c Release -o out`
+- Start command: `dotnet out/SignalFeed.Api.dll`
+- Health endpoint: `/health`
 
-Blueprint file: `render.yaml`
-
-Configured service:
-
-- Root directory: `backend/SignalFeed.Api`
-- Build: `dotnet restore && dotnet build --configuration Release --no-restore`
-- Start: `dotnet run --urls=http://0.0.0.0:10000`
-- Auto deploy: enabled (`autoDeployTrigger: commit`)
-
-Required environment variables on Render:
-
-- `FINNHUB__APIKEY`
-- `SUPABASE_URL` (if used)
-- `SUPABASE_KEY` (if used)
-- `CORS_ALLOWED_ORIGINS` (set to your Vercel URL)
-
-## Daily Workflow
-
-1. Develop on `dev` and push:
-   - `git checkout dev`
-   - make changes
-   - `git push origin dev`
-2. Promote to production:
-   - `git checkout main`
-   - `git merge dev`
-   - `git push origin main`
+## Operational Notes
+1. Enable branch protection on `main` and `dev`.
+2. Require PR + passing checks before merge.
+3. Keep secrets only in GitHub/Vercel/Render secret stores.

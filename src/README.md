@@ -7,4 +7,4 @@ This scaffold exists to support long-term modularization:
 
 Current active code paths:
 - Backend: `backend/SignalFeed.Api`
-- Frontend: `signal-ui`
+- Frontend: `frontend`
