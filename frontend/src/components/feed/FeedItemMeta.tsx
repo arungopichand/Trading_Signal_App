@@ -21,9 +21,9 @@ export function FeedItemMeta({ item, nowMs }: FeedItemMetaProps) {
       <span className="text-slate-600">|</span>
       <span className={`whitespace-nowrap font-semibold transition-all duration-150 ${directionClass}`}>{move}</span>
       <span className="text-slate-600">|</span>
-      <span className="whitespace-nowrap">Momentum: {momentum}</span>
-      <span className="text-slate-600">|</span>
       <span className="whitespace-nowrap">{item.source || "Scanner"}</span>
+      <span className="text-slate-600">|</span>
+      <span className="whitespace-nowrap">M {momentum}</span>
     </div>
   );
 }
