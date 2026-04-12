@@ -53,8 +53,7 @@ public class SignalBackgroundService : BackgroundService
         try
         {
             var batchResult = await _signalEngine.GenerateSignalsAsync(stoppingToken);
-
-            CachedSignals = batchResult.Signals;
+            var signalsForCache = batchResult.Signals.ToList();
             foreach (var signal in batchResult.Signals)
             {
                 await _feedService.AddSignalAsync(signal, stoppingToken);
@@ -62,6 +61,30 @@ public class SignalBackgroundService : BackgroundService
 
             if (batchResult.Signals.Count == 0)
             {
+                var fallbackSignal = new StockSignal
+                {
+                    Symbol = "SPY",
+                    CountryCode = "US",
+                    Price = 0m,
+                    PriceRange = "N/A",
+                    ChangePercent = 0m,
+                    SignalType = "TRENDING",
+                    Score = 5m,
+                    ActivityScore = 5m,
+                    Confidence = "LOW",
+                    TradeReadiness = "WATCH",
+                    Headline = "Market heartbeat: waiting for stronger live confluence signals.",
+                    SignalReason = "Fallback heartbeat signal keeps feed active.",
+                    Reasons = ["Fallback heartbeat"],
+                    Sentiment = "NEUTRAL",
+                    Source = "SYSTEM",
+                    Timestamp = DateTimeOffset.UtcNow,
+                    ScannedAt = DateTimeOffset.UtcNow,
+                    IsTrending = true,
+                    RepeatCount = 1
+                };
+                signalsForCache.Add(fallbackSignal);
+
                 await _feedService.AddItemAsync(new FeedItem
                 {
                     Symbol = "SPY",
@@ -82,6 +105,8 @@ public class SignalBackgroundService : BackgroundService
                     Timestamp = DateTimeOffset.UtcNow
                 }, stoppingToken);
             }
+
+            CachedSignals = signalsForCache;
 
             if (DateTimeOffset.UtcNow >= _nextNewsPull)
             {

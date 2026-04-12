@@ -23,6 +23,7 @@ public sealed class SignalEngine
     private readonly decimal _dedupScoreThreshold;
     private readonly int _scanWindowSize;
     private readonly int _maxParallelScans;
+    private readonly bool _allowClosedMarketScan;
     private readonly object _stateGate = new();
     private readonly List<SignalOccurrence> _recentSignals = [];
     private readonly Dictionary<string, (DateTimeOffset Timestamp, decimal Score)> _lastAcceptedSignalBySymbol = new(StringComparer.Ordinal);
@@ -41,12 +42,14 @@ public sealed class SignalEngine
         _dedupScoreThreshold = Math.Max(1m, configuration.GetValue<decimal?>("Scanner:DedupScoreThreshold") ?? 10m);
         _scanWindowSize = Math.Clamp(configuration.GetValue<int?>("Scanner:CycleSymbolCount") ?? DefaultScanWindowSize, 10, 15);
         _maxParallelScans = Math.Clamp(configuration.GetValue<int?>("Scanner:MaxParallelSymbols") ?? 6, 5, 10);
+        _allowClosedMarketScan = configuration.GetValue<bool?>("Scanner:AllowClosedMarketScan") ?? true;
     }
 
     public async Task<ScanBatchResult> GenerateSignalsAsync(CancellationToken cancellationToken = default)
     {
         var now = DateTimeOffset.UtcNow;
-        if (ResolveMarketSession(now) == "CLOSED")
+        var marketSession = ResolveMarketSession(now);
+        if (marketSession == "CLOSED" && !_allowClosedMarketScan)
         {
             _logger.LogInformation("Signal scan skipped for CLOSED session at {Timestamp}.", now);
             return new ScanBatchResult
@@ -54,6 +57,10 @@ public sealed class SignalEngine
                 Snapshots = [],
                 Signals = []
             };
+        }
+        else if (marketSession == "CLOSED" && _allowClosedMarketScan)
+        {
+            _logger.LogInformation("Signal scan running during CLOSED session at {Timestamp} (Scanner:AllowClosedMarketScan=true).", now);
         }
 
         var snapshots = new ConcurrentBag<QuoteSnapshot>();

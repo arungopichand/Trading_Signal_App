@@ -56,6 +56,10 @@ public sealed class ExternalNewsApiService
             using var response = await _httpClient.GetAsync(requestUri, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
+                _logger.LogWarning(
+                    "NewsAPI request failed for {Symbol} with status code {StatusCode}. Falling back to Finnhub news.",
+                    symbol.Trim().ToUpperInvariant(),
+                    (int)response.StatusCode);
                 return [];
             }
 
@@ -63,6 +67,11 @@ public sealed class ExternalNewsApiService
             var payload = await JsonSerializer.DeserializeAsync<NewsApiResponse>(stream, JsonOptions, cancellationToken);
             if (payload is null || !string.Equals(payload.Status, "ok", StringComparison.OrdinalIgnoreCase))
             {
+                _logger.LogWarning(
+                    "NewsAPI returned a non-ok payload for {Symbol}. Status={Status} Code={Code}. Falling back to Finnhub news.",
+                    symbol.Trim().ToUpperInvariant(),
+                    payload?.Status ?? "null",
+                    payload?.Code ?? "null");
                 return [];
             }
 
@@ -73,7 +82,7 @@ public sealed class ExternalNewsApiService
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException)
         {
-            _logger.LogDebug(ex, "NewsAPI fetch failed for {Symbol}.", symbol);
+            _logger.LogWarning(ex, "NewsAPI fetch failed for {Symbol}. Falling back to Finnhub news.", symbol.Trim().ToUpperInvariant());
             return [];
         }
     }

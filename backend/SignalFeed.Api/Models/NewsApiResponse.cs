@@ -7,6 +7,12 @@ public sealed class NewsApiResponse
     [JsonPropertyName("status")]
     public string Status { get; set; } = string.Empty;
 
+    [JsonPropertyName("code")]
+    public string? Code { get; set; }
+
+    [JsonPropertyName("message")]
+    public string? Message { get; set; }
+
     [JsonPropertyName("articles")]
     public List<NewsApiArticle> Articles { get; set; } = [];
 }
