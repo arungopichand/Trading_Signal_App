@@ -74,7 +74,19 @@ jobs:
         run: npm ci
 
       - name: Deploy to Vercel
-        run: npx vercel deploy --prod --yes --token "$VERCEL_TOKEN"
+        run: |
+          for i in 1 2 3; do
+            echo "Vercel deploy attempt $i/3"
+            if npx vercel deploy --prod --yes --token "$VERCEL_TOKEN"; then
+              exit 0
+            fi
+            if [ "$i" -lt 3 ]; then
+              echo "Deploy attempt failed; retrying in 10s..."
+              sleep 10
+            fi
+          done
+          echo "::error::Vercel deploy failed after 3 attempts."
+          exit 1
 
   verify-health:
     name: Verify Backend Health
