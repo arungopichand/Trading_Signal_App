@@ -79,9 +79,24 @@ jobs:
     env:
       BACKEND_HEALTHCHECK_URL: ${{ secrets.BACKEND_HEALTHCHECK_URL }}
     steps:
+      - name: Validate health check URL secret
+        run: |
+          if [ -z "$BACKEND_HEALTHCHECK_URL" ]; then
+            echo "::error::Missing BACKEND_HEALTHCHECK_URL secret."
+            exit 1
+          fi
+          case "$BACKEND_HEALTHCHECK_URL" in
+            http://*|https://*) ;;
+            *)
+              echo "::error::BACKEND_HEALTHCHECK_URL must be an absolute http(s) URL."
+              exit 1
+              ;;
+          esac
+          echo "HEALTH_URL=${BACKEND_HEALTHCHECK_URL%/}/health" >> "$GITHUB_ENV"
+
       - name: Wait for Render auto-deploy rollout
         run: sleep 60
 
       - name: Health check must return 200
         run: |
-          curl --fail --show-error --silent --retry 6 --retry-delay 10 "$BACKEND_HEALTHCHECK_URL/health"
+          curl --fail --show-error --silent --retry 6 --retry-delay 10 "$HEALTH_URL"
