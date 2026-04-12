@@ -70,27 +70,17 @@ jobs:
       - name: Deploy to Vercel
         run: npx vercel deploy --prod --yes --token "$VERCEL_TOKEN"
 
-  deploy-backend:
-    name: Deploy Backend (Render)
-    runs-on: ubuntu-latest
-    needs: build-and-test
-    env:
-      RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
-    steps:
-      - name: Trigger Render Deploy Hook
-        run: curl --fail -X POST "$RENDER_DEPLOY_HOOK"
-
   verify-health:
     name: Verify Backend Health
     runs-on: ubuntu-latest
     needs:
       - deploy-frontend
-      - deploy-backend
+      - build-and-test
     env:
       BACKEND_HEALTHCHECK_URL: ${{ secrets.BACKEND_HEALTHCHECK_URL }}
     steps:
-      - name: Wait for rollout
-        run: sleep 30
+      - name: Wait for Render auto-deploy rollout
+        run: sleep 60
 
       - name: Health check must return 200
         run: |
