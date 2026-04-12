@@ -1,13 +1,12 @@
 services:
   - type: web
     name: trading-backend-staging
-    runtime: dotnet
+    runtime: docker
     plan: free
     region: ohio
     branch: dev
-    rootDir: backend/SignalFeed.Api
-    buildCommand: dotnet publish -c Release -o out
-    startCommand: dotnet out/SignalFeed.Api.dll
+    dockerfilePath: backend/SignalFeed.Api/Dockerfile
+    dockerContext: backend/SignalFeed.Api
     healthCheckPath: /health
     autoDeployTrigger: commit
     envVars:
@@ -36,13 +35,12 @@ services:
 
   - type: web
     name: trading-backend-prod
-    runtime: dotnet
+    runtime: docker
     plan: free
     region: ohio
     branch: main
-    rootDir: backend/SignalFeed.Api
-    buildCommand: dotnet publish -c Release -o out
-    startCommand: dotnet out/SignalFeed.Api.dll
+    dockerfilePath: backend/SignalFeed.Api/Dockerfile
+    dockerContext: backend/SignalFeed.Api
     healthCheckPath: /health
     autoDeployTrigger: commit
     envVars:

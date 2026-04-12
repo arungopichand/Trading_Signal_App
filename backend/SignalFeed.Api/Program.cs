@@ -8,7 +8,15 @@ var builder = WebApplication.CreateBuilder(args);
 var aspNetCoreUrls = Environment.GetEnvironmentVariable("ASPNETCORE_URLS");
 if (string.IsNullOrWhiteSpace(aspNetCoreUrls))
 {
-    builder.WebHost.UseUrls("http://0.0.0.0:10000");
+    var port = Environment.GetEnvironmentVariable("PORT");
+    if (int.TryParse(port, out var parsedPort) && parsedPort > 0)
+    {
+        builder.WebHost.UseUrls($"http://0.0.0.0:{parsedPort}");
+    }
+    else
+    {
+        builder.WebHost.UseUrls("http://0.0.0.0:10000");
+    }
 }
 
 builder.Logging.ClearProviders();
