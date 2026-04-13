@@ -52,7 +52,7 @@ Pipeline fails if any build/test/deploy/health step fails.
 
 ### Frontend
 ```bash
-npx vercel deploy --prod --yes --token "$VERCEL_TOKEN"
+npx vercel --cwd frontend --prod --yes --token "$VERCEL_TOKEN"
 ```
 
 ### Health Check
