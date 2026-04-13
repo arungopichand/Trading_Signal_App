@@ -89,7 +89,7 @@ jobs:
 
       - name: Link frontend project explicitly
         working-directory: frontend
-        run: npx vercel link --yes --project frontend --scope arungopichands-projects --token "$VERCEL_TOKEN"
+        run: npx vercel link --yes --project trading-signal-ui --scope arungopichands-projects --token "$VERCEL_TOKEN"
 
       - name: Pull Vercel project settings
         working-directory: frontend
