@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HubConnection, HubConnectionBuilder, HttpTransportType, LogLevel } from "@microsoft/signalr";
 import { FeedHeader } from "./components/feed/FeedHeader";
 import { FeedList } from "./components/feed/FeedList";
@@ -374,7 +374,7 @@ function App() {
     };
   }, []);
 
-  const playSignalAudio = (item: FeedItem) => {
+  const playSignalAudio = useCallback((item: FeedItem) => {
     const score = item.score ?? item.activityScore;
     const now = Date.now();
     const canPlaySound = soundEnabledRef.current &&
@@ -415,9 +415,9 @@ function App() {
     }
 
     lastSoundTimeRef.current = now;
-  };
+  }, []);
 
-  const flushIncomingSignals = () => {
+  const flushIncomingSignals = useCallback(() => {
     incomingFlushTimerRef.current = null;
     const batch = incomingQueueRef.current;
     if (batch.length === 0) {
@@ -431,9 +431,9 @@ function App() {
     for (const item of batch) {
       playSignalAudio(item);
     }
-  };
+  }, [playSignalAudio]);
 
-  const enqueueIncomingSignals = (signals: FeedItem[]) => {
+  const enqueueIncomingSignals = useCallback((signals: FeedItem[]) => {
     if (signals.length === 0) {
       return;
     }
@@ -442,11 +442,11 @@ function App() {
     if (incomingFlushTimerRef.current === null) {
       incomingFlushTimerRef.current = window.setTimeout(flushIncomingSignals, INCOMING_FLUSH_MS);
     }
-  };
+  }, [flushIncomingSignals]);
 
-  const pushIncomingSignal = (item: FeedItem) => {
+  const pushIncomingSignal = useCallback((item: FeedItem) => {
     enqueueIncomingSignals([item]);
-  };
+  }, [enqueueIncomingSignals]);
 
   useEffect(() => {
     let isMounted = true;
@@ -571,7 +571,7 @@ function App() {
       void connection.stop();
       connectionRef.current = null;
     };
-  }, [simulationMode]);
+  }, [simulationMode, enqueueIncomingSignals, pushIncomingSignal]);
 
   useEffect(() => {
     if (!simulationMode) {
@@ -647,7 +647,7 @@ function App() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [simulationMode]);
+  }, [simulationMode, enqueueIncomingSignals]);
 
   useEffect(() => {
     if (!simulationMode) {
