@@ -73,7 +73,16 @@ jobs:
       RENDER_DEV_DEPLOY_HOOK: ${{ secrets.RENDER_DEV_DEPLOY_HOOK }}
     steps:
       - name: Trigger Render Dev Deploy Hook
-        run: curl --fail -X POST "$RENDER_DEV_DEPLOY_HOOK"
+        run: |
+          echo "Triggering Render dev hook (POST, fallback GET)..."
+          if curl --fail --show-error --silent -X POST "$RENDER_DEV_DEPLOY_HOOK" > /dev/null; then
+            echo "Render dev hook accepted POST."
+            exit 0
+          fi
+
+          echo "POST rejected; retrying with GET."
+          curl --fail --show-error --silent "$RENDER_DEV_DEPLOY_HOOK" > /dev/null
+          echo "Render dev hook accepted GET."
 
   verify-health:
     name: Verify Backend Health (Dev)
