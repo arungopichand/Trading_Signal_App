@@ -10,7 +10,7 @@ on:
       - '.github/workflows/deploy.yml'
       - 'Trading_Signal_App.sln'
       - 'render.yaml'
-# Trigger note: workflow path filter intentionally keeps prod deploy scoped to runtime-impacting changes.
+# Trigger note: workflow path filter intentionally keeps prod deploy scoped to runtime-impacting changes. # deploy-trigger 2026-04-13
 
 concurrency:
   group: deploy-${{ github.ref }}
