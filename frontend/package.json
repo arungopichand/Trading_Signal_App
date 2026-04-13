@@ -8,16 +8,17 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "vercel:pull:preview": "vercel pull --yes --environment=preview",
-    "vercel:pull:prod": "vercel pull --yes --environment=production",
-    "vercel:build:preview": "vercel build",
-    "vercel:build:prod": "vercel build --prod",
-    "vercel:deploy:preview": "vercel deploy --prebuilt --yes",
-    "vercel:deploy:prod": "vercel deploy --prebuilt --prod --yes"
+    "vercel:pull:preview": "vercel pull --yes --environment=preview --cwd ..",
+    "vercel:pull:prod": "vercel pull --yes --environment=production --cwd ..",
+    "vercel:build:preview": "vercel build --cwd ..",
+    "vercel:build:prod": "vercel build --prod --cwd ..",
+    "vercel:deploy:preview": "vercel deploy --prebuilt --yes --cwd ..",
+    "vercel:deploy:prod": "vercel deploy --prebuilt --prod --yes --cwd .."
   },
   "dependencies": {
     "@microsoft/signalr": "^10.0.0",
     "framer-motion": "^12.38.0",
+    "frontend": "file:",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
