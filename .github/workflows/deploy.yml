@@ -71,6 +71,24 @@ jobs:
       - name: Install dependencies
         run: npm ci --prefix frontend
 
+      - name: Validate Vercel secrets
+        run: |
+          if [ -z "$VERCEL_TOKEN" ]; then
+            echo "::error::Missing VERCEL_TOKEN secret."
+            exit 1
+          fi
+          if [ -z "$VERCEL_ORG_ID" ]; then
+            echo "::error::Missing VERCEL_ORG_ID secret."
+            exit 1
+          fi
+          if [ -z "$VERCEL_PROJECT_ID" ]; then
+            echo "::error::Missing VERCEL_PROJECT_ID secret."
+            exit 1
+          fi
+
+      - name: Link frontend project explicitly
+        run: npx vercel link --cwd frontend --yes --project frontend --scope arungopichands-projects --token "$VERCEL_TOKEN"
+
       - name: Deploy to Vercel
         run: |
           for i in 1 2 3; do
