@@ -89,6 +89,9 @@ jobs:
       - name: Link frontend project explicitly
         run: npx vercel link --cwd frontend --yes --project frontend --scope arungopichands-projects --token "$VERCEL_TOKEN"
 
+      - name: Pull Vercel project settings
+        run: npx vercel pull --cwd frontend --yes --environment=production --token "$VERCEL_TOKEN"
+
       - name: Build frontend artifacts with Vercel
         run: npx vercel build --cwd frontend --prod --token "$VERCEL_TOKEN"
 
