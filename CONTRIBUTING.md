@@ -1,9 +1,9 @@
 # Contributing Guide
 
 ## Branch Strategy
-- `main` -> production
-- `dev` -> development
-- `feature/*` -> feature branches
+- `main` -> production only
+- `dev` -> integration only
+- `feature/*` -> developer feature branches (must branch from `dev`)
 
 ## Pull Request Rules
 1. `feature/*` branches must target `dev`.
@@ -11,6 +11,8 @@
 3. CI must pass before merge.
 4. Do not merge if tests fail.
 5. Production deploys happen only from `main` (`.github/workflows/deploy.yml`).
+6. No direct push to `dev`.
+7. No direct push to `main`.
 
 ## Required GitHub Branch Protection
 1. Block direct pushes to `main`.
@@ -19,6 +21,9 @@
 4. Require status checks to pass:
    - `Build and Test / frontend`
    - `Build and Test / backend`
+5. Restrict merge targets:
+   - `feature/*` -> `dev` only
+   - `dev` -> `main` only for production promotion
 
 ## Local Validation
 - `dotnet restore Trading_Signal_App.sln`

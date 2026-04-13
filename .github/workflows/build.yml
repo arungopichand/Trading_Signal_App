@@ -1,6 +1,14 @@
 name: Build and Test
 
 on:
+  push:
+    branches:
+      - 'feature/**'
+    paths:
+      - 'frontend/**'
+      - 'backend/**'
+      - '.github/workflows/build.yml'
+      - 'Trading_Signal_App.sln'
   pull_request:
     branches:
       - main
@@ -9,6 +17,8 @@ on:
       - 'frontend/**'
       - 'backend/**'
       - '.github/workflows/build.yml'
+      - '.github/workflows/dev-deploy.yml'
+      - '.github/workflows/deploy.yml'
       - 'Trading_Signal_App.sln'
 
 concurrency:
