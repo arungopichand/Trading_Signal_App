@@ -25,9 +25,11 @@ Flow: `Frontend (Vercel) -> Backend API (Render) -> Supabase`
   - Build frontend + backend
   - Run tests (fail-fast)
   - Deploy frontend to Vercel
-  - Wait for Render auto-deploy readiness
-  - Run backend health check
-  - Run backend smoke check (`/api/feed?limit=1`)
+  - Trigger backend deploy via Render deploy hook
+  - Retry backend checks up to 10 attempts with 10s delay:
+    - `/health`
+    - `/api/feed?limit=1`
+    - optional `/health/stream`
 
 Pipeline fails if any build/test/deploy/health step fails.
 
@@ -42,6 +44,9 @@ Pipeline fails if any build/test/deploy/health step fails.
 - `BACKEND_HEALTHCHECK_URL`
   - Example: `https://your-backend-service.onrender.com`
   - Workflow checks: `${BACKEND_HEALTHCHECK_URL}/health`
+- `RENDER_DEPLOY_HOOK`
+  - Example: `https://api.render.com/deploy/srv-xxxx?key=yyyy`
+  - Used by production workflow to trigger backend deploy explicitly
 
 ## Deploy Commands Used in CI
 
@@ -54,6 +59,7 @@ npx vercel deploy --prod --yes --token "$VERCEL_TOKEN"
 ```bash
 curl --fail --show-error --silent "$BACKEND_HEALTHCHECK_URL/health"
 curl --fail --show-error --silent "$BACKEND_HEALTHCHECK_URL/api/feed?limit=1"
+curl --fail --show-error --silent "$BACKEND_HEALTHCHECK_URL/health/stream" # optional
 ```
 
 ## Render Service Runtime
