@@ -6,11 +6,14 @@ interface FeedListProps {
   items: FeedItemType[];
   nowMs: number;
   showTopOpportunity?: boolean;
+  onRowSelect?: (item: FeedItemType) => void;
 }
 
 const SIGNAL_EXPIRY_SECONDS = 75;
 
 type ViewMode = "compact" | "detailed";
+type SortKey = "score" | "change" | "age";
+type SortDirection = "asc" | "desc";
 
 function getAgeSeconds(item: FeedItemType, nowMs: number): number {
   const timestampMs = Date.parse(item.timestamp);
@@ -44,7 +47,24 @@ function formatAge(ageSeconds: number): string {
 }
 
 function formatSource(item: FeedItemType): string {
-  return (item.source || "Scanner").toUpperCase();
+  const raw = (item.source || "").trim().toUpperCase();
+  if (!raw) {
+    return "Live";
+  }
+
+  if (raw.includes("CACHE")) {
+    return "Delayed";
+  }
+
+  if (raw.includes("REST") || raw.includes("FALLBACK") || raw.includes("FINNHUB") || raw.includes("POLYGON")) {
+    return "Fallback";
+  }
+
+  if (raw === "WS" || raw.includes("WEBSOCKET") || raw.includes("STREAM")) {
+    return "Live";
+  }
+
+  return raw;
 }
 
 function formatChange(changePercent: number): string {
@@ -69,23 +89,63 @@ function summarizeDetails(item: FeedItemType): string {
   return item.headline;
 }
 
-export const FeedList = memo(function FeedList({ items, nowMs, showTopOpportunity = true }: FeedListProps) {
+export const FeedList = memo(function FeedList({
+  items,
+  nowMs,
+  showTopOpportunity = true,
+  onRowSelect,
+}: FeedListProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("compact");
+  const [sortKey, setSortKey] = useState<SortKey>("score");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
 
   const freshSorted = useMemo(() => {
     const fresh = items.filter((item) => getAgeSeconds(item, nowMs) < SIGNAL_EXPIRY_SECONDS);
-    const sorted = [...fresh].sort((a, b) => {
-      const bScore = b.score ?? b.activityScore;
-      const aScore = a.score ?? a.activityScore;
-      if (bScore !== aScore) {
-        return bScore - aScore;
+    return [...fresh];
+  }, [items, nowMs]);
+
+  const topOpportunity = freshSorted.find((item) => item.isTopOpportunity);
+  const rowsBase = topOpportunity ? freshSorted.filter((item) => item.id !== topOpportunity.id) : freshSorted;
+
+  const rows = useMemo(() => {
+    const sorted = [...rowsBase].sort((a, b) => {
+      let comparison = 0;
+      if (sortKey === "score") {
+        comparison = (a.score ?? a.activityScore) - (b.score ?? b.activityScore);
+      } else if (sortKey === "change") {
+        comparison = a.changePercent - b.changePercent;
+      } else {
+        comparison = getAgeSeconds(a, nowMs) - getAgeSeconds(b, nowMs);
       }
 
-      return Date.parse(b.timestamp) - Date.parse(a.timestamp);
+      if (comparison === 0) {
+        comparison = Date.parse(a.timestamp) - Date.parse(b.timestamp);
+      }
+
+      return sortDirection === "asc" ? comparison : -comparison;
     });
 
     return sorted;
-  }, [items, nowMs]);
+  }, [rowsBase, sortKey, sortDirection, nowMs]);
+
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
+      return;
+    }
+
+    setSortKey(key);
+    setSortDirection(key === "age" ? "asc" : "desc");
+  };
+
+  const sortMarker = (key: SortKey) => {
+    if (sortKey !== key) {
+      return "";
+    }
+
+    return sortDirection === "asc" ? " ↑" : " ↓";
+  };
 
   if (freshSorted.length === 0) {
     return (
@@ -94,9 +154,6 @@ export const FeedList = memo(function FeedList({ items, nowMs, showTopOpportunit
       </div>
     );
   }
-
-  const topOpportunity = freshSorted.find((item) => item.isTopOpportunity);
-  const rows = topOpportunity ? freshSorted.filter((item) => item.id !== topOpportunity.id) : freshSorted;
 
   return (
     <section aria-live="polite" className="space-y-2 px-2 py-2">
@@ -130,9 +187,21 @@ export const FeedList = memo(function FeedList({ items, nowMs, showTopOpportunit
             <tr>
               <th className="px-2 py-2 text-left font-semibold">Symbol</th>
               <th className="px-2 py-2 text-left font-semibold">Signal</th>
-              <th className="px-2 py-2 text-right font-semibold">Score</th>
-              <th className="px-2 py-2 text-right font-semibold">Change</th>
-              <th className="px-2 py-2 text-right font-semibold">Age</th>
+              <th className="px-2 py-2 text-right font-semibold">
+                <button type="button" className="hover:text-white" onClick={() => handleSort("score")}>
+                  Score{sortMarker("score")}
+                </button>
+              </th>
+              <th className="px-2 py-2 text-right font-semibold">
+                <button type="button" className="hover:text-white" onClick={() => handleSort("change")}>
+                  Change{sortMarker("change")}
+                </button>
+              </th>
+              <th className="px-2 py-2 text-right font-semibold">
+                <button type="button" className="hover:text-white" onClick={() => handleSort("age")}>
+                  Age{sortMarker("age")}
+                </button>
+              </th>
               <th className="px-2 py-2 text-left font-semibold">Source</th>
             </tr>
           </thead>
@@ -143,15 +212,27 @@ export const FeedList = memo(function FeedList({ items, nowMs, showTopOpportunit
               const signal = normalizeSignal(item);
               const topRowClass = index === 0 ? "bg-amber-500/10" : "";
               const changeClass = item.changePercent >= 0 ? "text-emerald-400" : "text-red-400";
+              const ageClass = ageSeconds <= 10
+                ? "text-emerald-400"
+                : ageSeconds <= 30
+                  ? "text-amber-300"
+                  : "text-red-400";
+              const selectedClass = selectedRowId === item.id ? "bg-sky-500/10 ring-1 ring-sky-500/40" : "";
 
               return (
                 <Fragment key={item.id}>
-                  <tr className={`border-t border-slate-800/70 ${topRowClass} hover:bg-slate-800/30`}>
+                  <tr
+                    className={`cursor-pointer border-t border-slate-800/70 transition-colors duration-150 ${topRowClass} ${selectedClass} hover:bg-slate-800/30`}
+                    onClick={() => {
+                      setSelectedRowId(item.id);
+                      onRowSelect?.(item);
+                    }}
+                  >
                     <td className="px-2 py-1.5 font-semibold text-slate-100">{item.symbol}</td>
                     <td className={`px-2 py-1.5 font-semibold ${signal.colorClass}`}>{signal.label}</td>
                     <td className="px-2 py-1.5 text-right font-mono">{score.toFixed(1)}</td>
                     <td className={`px-2 py-1.5 text-right font-mono ${changeClass}`}>{formatChange(item.changePercent)}</td>
-                    <td className="px-2 py-1.5 text-right font-mono text-slate-300">{formatAge(ageSeconds)}</td>
+                    <td className={`px-2 py-1.5 text-right font-mono ${ageClass}`}>{formatAge(ageSeconds)}</td>
                     <td className="px-2 py-1.5 text-slate-300">{formatSource(item)}</td>
                   </tr>
                   {viewMode === "detailed" ? (

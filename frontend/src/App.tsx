@@ -328,6 +328,7 @@ function App() {
   const [simulationMode, setSimulationMode] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState<"watchlist" | "simulator">("watchlist");
+  const [selectedSignal, setSelectedSignal] = useState<FeedItem | null>(null);
   const connectionRef = useRef<HubConnection | null>(null);
   const itemsRef = useRef<FeedItem[]>([]);
   const feedContainerRef = useRef<HTMLDivElement | null>(null);
@@ -824,7 +825,15 @@ function App() {
               Live Signals
             </div>
             <div ref={feedContainerRef} className="h-[42vh] overflow-y-auto lg:h-[56vh]">
-              <FeedList items={panelItems} nowMs={nowMs} showTopOpportunity={false} />
+              <FeedList
+                items={panelItems}
+                nowMs={nowMs}
+                showTopOpportunity={false}
+                onRowSelect={(item) => {
+                  setSelectedSignal(item);
+                  setRightPanelTab("simulator");
+                }}
+              />
             </div>
           </section>
 
@@ -846,6 +855,16 @@ function App() {
               </button>
             </div>
             <div className="h-[42vh] overflow-y-auto p-3 text-sm lg:h-[56vh]">
+              {selectedSignal ? (
+                <div className="mb-3 rounded border border-slate-800 bg-slate-900/70 p-2">
+                  <div className="text-[11px] text-slate-400">Selected Signal</div>
+                  <div className="mt-1 font-semibold text-slate-100">
+                    {selectedSignal.symbol} {selectedSignal.changePercent >= 0 ? "+" : ""}
+                    {selectedSignal.changePercent.toFixed(2)}%
+                  </div>
+                  <div className="truncate text-[11px] text-slate-300">{selectedSignal.headline}</div>
+                </div>
+              ) : null}
               {rightPanelTab === "watchlist" ? (
                 <ul className="space-y-2">
                   {watchlistSymbols.map((symbol) => (
