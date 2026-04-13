@@ -67,15 +67,17 @@ Pipeline fails if any build/test/deploy/health step fails.
 
 ### Frontend
 ```bash
-npx vercel pull --yes --environment=preview --token "$VERCEL_TOKEN"
-npx vercel build --token "$VERCEL_TOKEN"
-npx vercel deploy --prebuilt --yes --token "$VERCEL_TOKEN"
+cd frontend
+npm run vercel:pull:preview -- --token "$VERCEL_TOKEN"
+npm run vercel:build:preview -- --token "$VERCEL_TOKEN"
+npm run vercel:deploy:preview -- --token "$VERCEL_TOKEN"
 ```
 
 ```bash
-npx vercel pull --yes --environment=production --token "$VERCEL_TOKEN"
-npx vercel build --prod --token "$VERCEL_TOKEN"
-npx vercel deploy --prebuilt --prod --yes --token "$VERCEL_TOKEN"
+cd frontend
+npm run vercel:pull:prod -- --token "$VERCEL_TOKEN"
+npm run vercel:build:prod -- --token "$VERCEL_TOKEN"
+npm run vercel:deploy:prod -- --token "$VERCEL_TOKEN"
 ```
 
 ### Health Check
