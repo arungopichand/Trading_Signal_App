@@ -23,12 +23,12 @@ export function TopOpportunity({ item, nowMs }: TopOpportunityProps) {
   const changeText = `${item.changePercent >= 0 ? "+" : ""}${item.changePercent.toFixed(2)}%`;
   const changeClass = item.changePercent >= 0 ? "text-emerald-400" : "text-red-400";
   const signalClass = signal === "SPIKE"
-    ? "text-orange-300"
+    ? "text-amber-300"
     : signal === "BULLISH"
       ? "text-emerald-300"
       : signal === "BEARISH"
         ? "text-red-300"
-        : "text-sky-300";
+        : "text-slate-200";
 
   const factors = [
     `Vol: ${typeof item.volume === "number" ? formatNumberCompact(item.volume) : "-"}`,
@@ -51,9 +51,9 @@ export function TopOpportunity({ item, nowMs }: TopOpportunityProps) {
   const momentumAt = item.momentumDetectedAt ? formatExactTime(item.momentumDetectedAt) : "--:--:-- --";
 
   return (
-    <section className="animate-top-opportunity-in border border-yellow-500/30 bg-[#0F141A] p-3 shadow-[0_0_10px_rgba(255,200,0,0.2)]">
+    <section className="animate-top-opportunity-in border border-yellow-500/20 bg-[#0F141A] p-3">
       <div className="text-[11px] font-bold tracking-widest text-amber-200">
-        🔥 TOP OPPORTUNITY
+        TOP OPPORTUNITY
       </div>
 
       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-semibold">
@@ -62,7 +62,7 @@ export function TopOpportunity({ item, nowMs }: TopOpportunityProps) {
         {range ? <span className="text-slate-400">{range}</span> : null}
         <span className={`font-bold ${signalClass}`}>{signal}</span>
         <span className="text-xs text-slate-300">({confidence})</span>
-        {item.isTrending ? <span className="text-[11px] font-bold text-amber-300">🔥 TRENDING</span> : null}
+        {item.isTrending ? <span className="text-[11px] font-bold text-amber-300">TRENDING</span> : null}
       </div>
 
       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-sm">
@@ -86,14 +86,14 @@ export function TopOpportunity({ item, nowMs }: TopOpportunityProps) {
 
       <ul className="mt-2 space-y-0.5 text-xs text-slate-300">
         {reasonItems.map((entry) => (
-          <li key={entry}>• {entry}</li>
+          <li key={entry}>- {entry}</li>
         ))}
       </ul>
 
       <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
         <span>{scannedAt}</span>
         <span>|</span>
-        <span>Momentum: {momentumAt}</span>
+        <span>M: {momentumAt}</span>
         <span>|</span>
         <span>{item.source || "Scanner"}</span>
       </div>

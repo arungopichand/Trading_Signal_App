@@ -5,10 +5,12 @@ interface FeedHeaderProps {
   autoScroll: boolean;
   soundEnabled: boolean;
   simulationMode: boolean;
+  focusMode: boolean;
   onFilterChange: (filter: FeedFilter) => void;
   onAutoScrollChange: (enabled: boolean) => void;
   onSoundEnabledChange: (enabled: boolean) => void;
   onSimulationModeChange: (enabled: boolean) => void;
+  onFocusModeChange: (enabled: boolean) => void;
   status: "live" | "degraded" | "offline";
   simulationStatsLabel?: string;
 }
@@ -20,10 +22,12 @@ export function FeedHeader({
   autoScroll,
   soundEnabled,
   simulationMode,
+  focusMode,
   onFilterChange,
   onAutoScrollChange,
   onSoundEnabledChange,
   onSimulationModeChange,
+  onFocusModeChange,
   status,
   simulationStatsLabel,
 }: FeedHeaderProps) {
@@ -58,6 +62,15 @@ export function FeedHeader({
           ))}
           <button
             type="button"
+            onClick={() => onFocusModeChange(!focusMode)}
+            className={`px-2 py-1 text-[11px] font-semibold ${
+              focusMode ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            FOCUS {focusMode ? "ON" : "OFF"}
+          </button>
+          <button
+            type="button"
             onClick={() => onAutoScrollChange(!autoScroll)}
             className={`px-2 py-1 text-[11px] font-semibold ${
               autoScroll ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200"
@@ -72,7 +85,7 @@ export function FeedHeader({
               soundEnabled ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200"
             }`}
           >
-            {soundEnabled ? "\u{1F50A} SOUND ON" : "\u{1F507} SOUND OFF"}
+            SOUND {soundEnabled ? "ON" : "OFF"}
           </button>
           <button
             type="button"
@@ -81,13 +94,13 @@ export function FeedHeader({
               simulationMode ? "bg-amber-700 text-amber-50" : "text-slate-400 hover:text-slate-200"
             }`}
           >
-            {simulationMode ? "\u{1F9EA} SIMULATION MODE ON" : "\u{1F9EA} SIMULATION MODE OFF"}
+            SIM {simulationMode ? "ON" : "OFF"}
           </button>
         </div>
       </div>
       <div className="flex items-center justify-between border-t border-slate-800 px-3 py-1.5 text-[11px] font-bold tracking-widest text-slate-500">
-        <span>SYMBOL | SIGNAL | HEADLINE | FACTORS | TIME</span>
-        <span className="hidden md:block">DENSE TERMINAL FEED</span>
+        <span>MARKET PULSE | TOP SIGNAL | LIVE LIST | WATCHLIST</span>
+        <span className="hidden md:block">PHASE 2 DASHBOARD</span>
       </div>
     </header>
   );

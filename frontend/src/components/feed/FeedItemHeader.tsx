@@ -6,21 +6,21 @@ interface FeedItemHeaderProps {
 }
 
 const signalLabel: Record<FeedItem["signalType"], string> = {
-  SPIKE: "\u{1F525} SPIKE",
-  BULLISH: "\u{1F4C8} BULLISH",
-  BEARISH: "\u{1F4C9} BEARISH",
-  NEWS: "\u{1F4F0} NEWS",
-  TRENDING: "\u{1F525} TRENDING",
-  TOP_OPPORTUNITY: "\u{1F525} TOP_OPPORTUNITY",
+  SPIKE: "SPIKE",
+  BULLISH: "BULLISH",
+  BEARISH: "BEARISH",
+  NEWS: "NEWS",
+  TRENDING: "TRENDING",
+  TOP_OPPORTUNITY: "TOP",
 };
 
 const signalStyle: Record<FeedItem["signalType"], string> = {
-  SPIKE: "text-amber-200",
+  SPIKE: "text-amber-300",
   BULLISH: "text-emerald-300",
   BEARISH: "text-red-300",
-  NEWS: "text-sky-300",
-  TRENDING: "text-orange-200",
-  TOP_OPPORTUNITY: "text-amber-100",
+  NEWS: "text-slate-300",
+  TRENDING: "text-slate-300",
+  TOP_OPPORTUNITY: "text-amber-200",
 };
 
 export function FeedItemHeader({ item }: FeedItemHeaderProps) {
@@ -34,7 +34,9 @@ export function FeedItemHeader({ item }: FeedItemHeaderProps) {
       <span className={`shrink-0 ${pulseClass}`}>{getFlagEmoji(item.countryCode)}</span>
       <span className={`shrink-0 text-slate-100 ${pulseClass} ${topClass}`}>{item.symbol}</span>
       {range ? <span className="shrink-0 text-slate-400">{range}</span> : null}
-      <span className={`shrink-0 ${signalStyle[item.signalType]} ${pulseClass}`}>{signalLabel[item.signalType]}</span>
+      <span className={`shrink-0 rounded border border-slate-700/80 px-1.5 py-0.5 text-[11px] ${signalStyle[item.signalType]} ${pulseClass}`}>
+        {signalLabel[item.signalType]}
+      </span>
       <span className="shrink-0 text-xs text-slate-300">({confidence})</span>
     </div>
   );
