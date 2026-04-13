@@ -37,4 +37,11 @@ public sealed class FeedController : ControllerBase
         var snapshot = _simulationSignalService.GetStatsSnapshot();
         return Ok(snapshot);
     }
+
+    [HttpGet("sim-performance")]
+    public ActionResult<SimulationPerformanceSnapshot> GetSimulationPerformance()
+    {
+        var snapshot = _simulationSignalService.GetPerformanceSnapshot();
+        return Ok(snapshot);
+    }
 }

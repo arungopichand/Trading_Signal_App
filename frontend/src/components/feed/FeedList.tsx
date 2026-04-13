@@ -4,14 +4,17 @@ import type { FeedItem as FeedItemType } from "./types";
 
 interface FeedListProps {
   items: FeedItemType[];
+  newsItems?: FeedItemType[];
   nowMs: number;
   showTopOpportunity?: boolean;
   onRowSelect?: (item: FeedItemType) => void;
+  pinnedSymbols: Set<string>;
+  onPinToggle: (symbol: string) => void;
 }
 
 const SIGNAL_EXPIRY_SECONDS = 75;
 type ViewMode = "compact" | "detailed";
-type SortKey = "score" | "change" | "age";
+type SortKey = "score" | "change" | "age" | "spike";
 type SortDirection = "asc" | "desc";
 type FlashDirection = "up" | "down";
 
@@ -93,11 +96,24 @@ function summarizeDetails(item: FeedItemType): string {
   return item.headline;
 }
 
+function calculateSpikeScore(item: FeedItemType): number {
+  const score = item.score ?? item.activityScore;
+  const volumeSpike = Math.max(0, item.volumeRatio ?? (item.volume && item.volume >= 1_000_000 ? 1 : 0));
+  return Number((Math.abs(item.changePercent) * 0.5 + volumeSpike * 0.3 + score * 0.2).toFixed(2));
+}
+
+function isNewsSpikeCandidate(item: FeedItemType): boolean {
+  const score = item.score ?? item.activityScore;
+  return Math.abs(item.changePercent) > 2 || score > 85;
+}
+
 function sortRows(rows: FeedItemType[], sortKey: SortKey, sortDirection: SortDirection, nowMs: number): FeedItemType[] {
   const sorted = [...rows].sort((a, b) => {
     let comparison = 0;
     if (sortKey === "score") {
       comparison = (a.score ?? a.activityScore) - (b.score ?? b.activityScore);
+    } else if (sortKey === "spike") {
+      comparison = calculateSpikeScore(a) - calculateSpikeScore(b);
     } else if (sortKey === "change") {
       comparison = a.changePercent - b.changePercent;
     } else {
@@ -116,15 +132,17 @@ function sortRows(rows: FeedItemType[], sortKey: SortKey, sortDirection: SortDir
 
 export const FeedList = memo(function FeedList({
   items,
+  newsItems = [],
   nowMs,
   showTopOpportunity = true,
   onRowSelect,
+  pinnedSymbols,
+  onPinToggle,
 }: FeedListProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("compact");
   const [sortKey, setSortKey] = useState<SortKey>("score");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
-  const [pinnedSymbols, setPinnedSymbols] = useState<Set<string>>(new Set());
   const [sortLocked, setSortLocked] = useState(false);
   const [lockedOrder, setLockedOrder] = useState<string[]>([]);
 
@@ -170,6 +188,28 @@ export const FeedList = memo(function FeedList({
     [orderedRows, pinnedSymbols],
   );
   const rows = useMemo(() => [...pinnedRows, ...unpinnedRows], [pinnedRows, unpinnedRows]);
+  const topNewsBySymbol = useMemo(() => {
+    const map = new Map<string, FeedItemType>();
+    for (const item of newsItems) {
+      if (item.signalType !== "NEWS" || !item.url || !item.headline) {
+        continue;
+      }
+
+      const existing = map.get(item.symbol);
+      if (!existing) {
+        map.set(item.symbol, item);
+        continue;
+      }
+
+      const existingScore = existing.score ?? existing.activityScore;
+      const itemScore = item.score ?? item.activityScore;
+      if (item.timestamp > existing.timestamp || itemScore > existingScore) {
+        map.set(item.symbol, item);
+      }
+    }
+
+    return map;
+  }, [newsItems]);
 
   useEffect(() => {
     for (const row of rows) {
@@ -227,18 +267,6 @@ export const FeedList = memo(function FeedList({
 
     const nextRows = sortRows(freshRows, key, nextDirection, nowMs);
     setLockedOrder(nextRows.map((row) => row.id));
-  };
-
-  const handlePinToggle = (symbol: string) => {
-    setPinnedSymbols((current) => {
-      const next = new Set(current);
-      if (next.has(symbol)) {
-        next.delete(symbol);
-      } else {
-        next.add(symbol);
-      }
-      return next;
-    });
   };
 
   const handleKeyboardNavigation = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -327,6 +355,11 @@ export const FeedList = memo(function FeedList({
                 </button>
               </th>
               <th className="px-2 py-2 text-right font-semibold">
+                <button type="button" className="hover:text-white" onClick={() => handleSort("spike")}>
+                  Spike{sortMarker("spike")}
+                </button>
+              </th>
+              <th className="px-2 py-2 text-right font-semibold">
                 <button type="button" className="hover:text-white" onClick={() => handleSort("change")}>
                   Change{sortMarker("change")}
                 </button>
@@ -342,6 +375,7 @@ export const FeedList = memo(function FeedList({
           <tbody>
             {rows.map((item, index) => {
               const score = item.score ?? item.activityScore;
+              const spikeScore = calculateSpikeScore(item);
               const ageSeconds = getAgeSeconds(item, nowMs);
               const signal = normalizeSignal(item);
               const pinned = pinnedSymbols.has(item.symbol);
@@ -372,7 +406,7 @@ export const FeedList = memo(function FeedList({
                         className={`mr-1 text-[10px] ${pinned ? "text-amber-300" : "text-slate-600 hover:text-slate-400"}`}
                         onClick={(event) => {
                           event.stopPropagation();
-                          handlePinToggle(item.symbol);
+                          onPinToggle(item.symbol);
                         }}
                         aria-label={pinned ? `Unpin ${item.symbol}` : `Pin ${item.symbol}`}
                       >
@@ -382,13 +416,14 @@ export const FeedList = memo(function FeedList({
                     </td>
                     <td className={`px-2 py-1.5 font-semibold ${signal.colorClass}`}>{signal.label}</td>
                     <td className="px-2 py-1.5 text-right font-mono">{score.toFixed(1)}</td>
+                    <td className="px-2 py-1.5 text-right font-mono text-sky-300">{spikeScore.toFixed(1)}</td>
                     <td className={`px-2 py-1.5 text-right font-mono ${changeClass}`}>{formatChange(item.changePercent)}</td>
                     <td className={`px-2 py-1.5 text-right font-mono ${ageClass}`}>{formatAge(ageSeconds)}</td>
                     <td className="px-2 py-1.5 text-slate-300">{formatSource(item)}</td>
                   </tr>
                   {viewMode === "detailed" ? (
                     <tr className={`border-t border-slate-800/40 ${topRowClass}`}>
-                      <td colSpan={6} className="px-2 py-1.5 text-[11px] text-slate-400">
+                      <td colSpan={7} className="px-2 py-1.5 text-[11px] text-slate-400">
                         <span className="text-slate-300">{summarizeDetails(item)}</span>
                         {item.url ? (
                           <a
@@ -400,6 +435,26 @@ export const FeedList = memo(function FeedList({
                             link
                           </a>
                         ) : null}
+                        {isNewsSpikeCandidate(item) ? (() => {
+                          const topNews = topNewsBySymbol.get(item.symbol);
+                          if (!topNews?.url) {
+                            return null;
+                          }
+
+                          return (
+                            <>
+                              <span className="ml-2 text-amber-300">News:</span>
+                              <a
+                                href={topNews.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="ml-1 text-amber-200 underline-offset-2 hover:text-amber-100 hover:underline"
+                              >
+                                {topNews.headline}
+                              </a>
+                            </>
+                          );
+                        })() : null}
                       </td>
                     </tr>
                   ) : null}

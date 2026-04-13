@@ -33,6 +33,7 @@ builder.Services.AddMemoryCache();
 builder.Services.AddResponseCompression();
 builder.Services.AddSingleton<ApiUsageTracker>();
 builder.Services.AddSingleton<ApiKeyStatusProvider>();
+builder.Services.AddSingleton<FinnhubProviderState>();
 
 static TimeSpan ResolveProviderTimeout(IConfiguration configuration, string providerKey, int defaultSeconds)
 {
@@ -55,6 +56,15 @@ builder.Services.AddHttpClient<FinnhubService>(client =>
     var serviceName = nameof(FinnhubService);
     tracker.RegisterConfiguredService(serviceName, "https://finnhub.io/api/v1");
     return new ApiCallLoggingHandler(tracker, serviceProvider.GetRequiredService<ILoggerFactory>(), serviceName);
+});
+builder.Services.AddHttpClient<FinnhubProviderProbeService>(client =>
+{
+    client.BaseAddress = new Uri("https://finnhub.io/api/v1/");
+    client.Timeout = ResolveProviderTimeout(builder.Configuration, "Finnhub", 8);
+})
+.ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+{
+    UseProxy = false
 });
 
 builder.Services.AddHttpClient<PolygonService>(client =>
@@ -142,8 +152,10 @@ builder.Services.AddSingleton<SimulationSignalService>();
 var enableSignalScanner = builder.Configuration.GetValue<bool?>("ENABLE_SIGNAL_SCANNER") ?? true;
 var enableUniverseRefresh = builder.Configuration.GetValue<bool?>("ENABLE_UNIVERSE_REFRESH") ?? true;
 var enableFinnhubPriceStream = builder.Configuration.GetValue<bool?>("ENABLE_FINNHUB_PRICE_STREAM") ?? true;
+var finnhubApiKey = FinnhubProviderState.ResolveApiKey(builder.Configuration);
+var finnhubConfigured = !string.IsNullOrWhiteSpace(finnhubApiKey);
 
-if (enableFinnhubPriceStream)
+if (enableFinnhubPriceStream && finnhubConfigured)
 {
     builder.Services.AddHostedService(serviceProvider =>
         serviceProvider.GetRequiredService<FinnhubQuoteStreamService>());
@@ -158,6 +170,8 @@ if (enableSignalScanner)
 {
     builder.Services.AddHostedService<SignalBackgroundService>();
 }
+
+builder.Services.AddHostedService<FinnhubProviderProbeService>();
 
 var allowedOrigins = ParseAllowedOrigins(
     Environment.GetEnvironmentVariable("CORS_ALLOWED_ORIGINS")
@@ -177,6 +191,12 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+var finnhubProviderState = app.Services.GetRequiredService<FinnhubProviderState>();
+finnhubProviderState.Initialize(finnhubApiKey, app.Logger);
+if (!finnhubConfigured)
+{
+    app.Logger.LogCritical("FINNHUB KEY MISSING. WebSocket and Finnhub REST provider are disabled.");
+}
 
 app.UseResponseCompression();
 app.UseCors("AllowFrontend");
@@ -211,6 +231,27 @@ app.MapGet("/", () => Results.Ok(new
 }));
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok", timestamp = DateTimeOffset.UtcNow }));
+app.MapGet("/health/finnhub", (FinnhubProviderState state, IFinnhubWebSocketService stream) =>
+{
+    var snapshot = state.GetSnapshot();
+    var streamHealth = stream.GetHealthSnapshot();
+    var overallStatus = !snapshot.Configured || !snapshot.Valid
+        ? "DOWN"
+        : streamHealth.IsConnected
+            ? "UP"
+            : "DEGRADED";
+
+    return Results.Ok(new
+    {
+        configured = snapshot.Configured,
+        valid = snapshot.Valid,
+        wsConnected = streamHealth.IsConnected,
+        lastError = snapshot.LastError,
+        lastErrorKind = snapshot.LastErrorKind,
+        lastSuccessSecondsAgo = snapshot.LastSuccessSecondsAgo,
+        overallStatus
+    });
+});
 app.MapGet("/health/stream", (IFinnhubWebSocketService stream, MarketDataService marketDataService) =>
 {
     var streamHealth = stream.GetHealthSnapshot();
@@ -225,6 +266,47 @@ app.MapGet("/health/stream", (IFinnhubWebSocketService stream, MarketDataService
             staleDataRatePercent = marketMetrics.StaleDataRatePercent,
             websocketReconnectCount = marketMetrics.WebsocketReconnectCount,
             rateLimitHits = marketMetrics.RateLimitHits
+        },
+        timestamp = DateTimeOffset.UtcNow
+    });
+});
+app.MapGet("/metrics/summary", (MarketDataService marketDataService, FeedService feedService) =>
+{
+    var marketData = marketDataService.GetHealthMetrics();
+    var feed = feedService.GetRuntimeDiagnostics();
+    var scanner = SignalBackgroundService.GetRuntimeSnapshot();
+
+    return Results.Ok(new
+    {
+        provider_success_count = marketData.ProviderSuccessCount,
+        provider_failure_count = marketData.ProviderFailureCount,
+        rate_limit_hits = marketData.RateLimitHits,
+        websocket_reconnect_count = marketData.WebsocketReconnectCount,
+        cache_hit_ratio = marketData.CacheHitRatio,
+        stale_data_return_count = marketData.StaleDataReturnCount,
+        finnhub_success_count = marketData.FinnhubSuccessCount,
+        finnhub_failure_count = marketData.FinnhubFailureCount,
+        finnhub_key_invalid_count = marketData.FinnhubKeyInvalidCount,
+        fallback_finnhub_skipped_count = marketData.FallbackFinnhubSkippedCount,
+        fallback_polygon_used_count = marketData.FallbackPolygonUsedCount,
+        fallback_cache_used_count = marketData.FallbackCacheUsedCount,
+        latency = new
+        {
+            p50 = marketData.ProviderLatencyP50Ms,
+            p95 = marketData.ProviderLatencyP95Ms,
+            p99 = marketData.ProviderLatencyP99Ms
+        },
+        feed = new
+        {
+            broadcastCount = feed.BroadcastCount,
+            averageBroadcastLatencyMs = feed.AverageBroadcastLatencyMs,
+            sourceSwitchCount = feed.SourceSwitchCount
+        },
+        scanner = new
+        {
+            scanCycleCount = scanner.ScanCycleCount,
+            lastScanDurationMs = scanner.LastScanDurationMs,
+            averageScanDurationMs = scanner.AverageScanDurationMs
         },
         timestamp = DateTimeOffset.UtcNow
     });

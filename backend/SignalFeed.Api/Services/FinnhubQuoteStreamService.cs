@@ -17,6 +17,7 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
 
     private readonly IOptionsMonitor<FinnhubWebSocketOptions> _optionsMonitor;
     private readonly ILogger<FinnhubQuoteStreamService> _logger;
+    private readonly FinnhubProviderState _finnhubProviderState;
     private readonly ConcurrentDictionary<string, byte> _subscribedSymbols = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastTouchedBySymbol = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, StreamPriceSnapshot> _latestPriceBySymbol = new(StringComparer.Ordinal);
@@ -24,14 +25,17 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
     private readonly object _socketGate = new();
     private ClientWebSocket? _socket;
     private volatile bool _isConnected;
+    private DateTimeOffset _lastMessageAtUtc = DateTimeOffset.MinValue;
     private long _reconnectCount;
     private DateTimeOffset _rateLimitedUntilUtc = DateTimeOffset.MinValue;
 
     public FinnhubQuoteStreamService(
         IOptionsMonitor<FinnhubWebSocketOptions> optionsMonitor,
+        FinnhubProviderState finnhubProviderState,
         ILogger<FinnhubQuoteStreamService> logger)
     {
         _optionsMonitor = optionsMonitor;
+        _finnhubProviderState = finnhubProviderState;
         _logger = logger;
     }
 
@@ -41,6 +45,9 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
     {
         var now = DateTimeOffset.UtcNow;
         var rateLimitedUntil = _rateLimitedUntilUtc > now ? _rateLimitedUntilUtc : (DateTimeOffset?)null;
+        var lastMessageSecondsAgo = _lastMessageAtUtc == DateTimeOffset.MinValue
+            ? (long?)null
+            : Math.Max(0, (long)(now - _lastMessageAtUtc).TotalSeconds);
         return new FinnhubStreamHealthSnapshot
         {
             IsConnected = _isConnected,
@@ -48,6 +55,7 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
             ActiveSubscriptionCount = _subscribedSymbols.Count,
             CachedPriceCount = _latestPriceBySymbol.Count,
             RateLimitedUntilUtc = rateLimitedUntil,
+            LastMessageSecondsAgo = lastMessageSecondsAgo,
             TimestampUtc = now
         };
     }
@@ -157,8 +165,16 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
             var token = ResolveToken(options);
             if (string.IsNullOrWhiteSpace(token))
             {
+                _finnhubProviderState.MarkMissing(_logger);
                 _logger.LogWarning("Finnhub websocket is disabled because API key is missing.");
                 await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                continue;
+            }
+
+            if (!_finnhubProviderState.CanUseProvider)
+            {
+                _logger.LogWarning("Finnhub websocket is disabled because FINNHUB key is invalid.");
+                await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
                 continue;
             }
 
@@ -193,7 +209,9 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
                     }
 
                     _isConnected = true;
+                    _lastMessageAtUtc = DateTimeOffset.UtcNow;
                     _logger.LogInformation("Finnhub websocket connected.");
+                    _finnhubProviderState.RecordSuccess();
                     await ResubscribeAllAsync(stoppingToken);
 
                     nextDelayMs = Math.Max(250, options.InitialReconnectDelayMs);
@@ -208,6 +226,7 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
                     var rateLimitCooldownSeconds = Math.Max(30, options.RateLimitCooldownSeconds);
                     _rateLimitedUntilUtc = DateTimeOffset.UtcNow.AddSeconds(rateLimitCooldownSeconds);
                     skipBackoffWait = true;
+                    _finnhubProviderState.RecordRateLimit(_logger);
                     _logger.LogWarning(
                         ex,
                         "Finnhub websocket handshake rate-limited (429). Cooling down reconnects for {Seconds}s.",
@@ -215,6 +234,16 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
                 }
                 catch (Exception ex)
                 {
+                    var kind = FinnhubErrorClassifier.Classify(null, ex.Message, ex);
+                    if (kind == FinnhubErrorKind.InvalidKey)
+                    {
+                        _finnhubProviderState.MarkInvalid("FINNHUB KEY INVALID (websocket-handshake)", _logger);
+                    }
+                    else
+                    {
+                        _finnhubProviderState.RecordFailure(null, ex.Message, "websocket-handshake", _logger);
+                    }
+
                     _logger.LogWarning(ex, "Finnhub websocket session failed.");
                 }
                 finally
@@ -288,7 +317,27 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
             var payload = await ReceiveTextMessageAsync(socket, buffer, cancellationToken);
             if (!string.IsNullOrWhiteSpace(payload))
             {
+                _lastMessageAtUtc = DateTimeOffset.UtcNow;
                 ProcessMessage(payload);
+            }
+
+            var heartbeatStaleAfter = TimeSpan.FromSeconds(Math.Max(20, _optionsMonitor.CurrentValue.HeartbeatStaleSeconds));
+            if (_lastMessageAtUtc != DateTimeOffset.MinValue &&
+                DateTimeOffset.UtcNow - _lastMessageAtUtc > heartbeatStaleAfter)
+            {
+                _logger.LogWarning(
+                    "Finnhub websocket heartbeat stale for {Seconds}s. Forcing reconnect.",
+                    Math.Floor((DateTimeOffset.UtcNow - _lastMessageAtUtc).TotalSeconds));
+                try
+                {
+                    socket.Abort();
+                }
+                catch
+                {
+                    // best effort
+                }
+
+                return;
             }
 
             if (DateTimeOffset.UtcNow >= nextCleanupAt)
@@ -458,7 +507,8 @@ public sealed class FinnhubQuoteStreamService : BackgroundService, IFinnhubWebSo
 
     private static string ResolveToken(FinnhubWebSocketOptions options)
     {
-        return Environment.GetEnvironmentVariable("FINNHUB__APIKEY")
+        return Environment.GetEnvironmentVariable("FINNHUB_API_KEY")
+            ?? Environment.GetEnvironmentVariable("FINNHUB__APIKEY")
             ?? options.Token
             ?? string.Empty;
     }

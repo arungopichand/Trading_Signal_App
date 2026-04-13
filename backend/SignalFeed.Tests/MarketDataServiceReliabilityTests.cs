@@ -160,17 +160,21 @@ public sealed class MarketDataServiceReliabilityTests
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
+                ["FINNHUB_API_KEY"] = "test-finnhub-key",
                 ["FINNHUB__APIKEY"] = "test-finnhub-key",
                 ["POLYGON__APIKEY"] = "test-polygon-key",
                 ["NEWSAPI__APIKEY"] = "test-news-key",
                 ["FMP__APIKEY"] = "test-fmp-key"
             })
             .Build();
+        var finnhubProviderState = new FinnhubProviderState();
+        finnhubProviderState.Initialize("test-finnhub-key", NullLogger.Instance);
 
         var finnhub = new FinnhubService(
             new HttpClient(finnhubHandler) { BaseAddress = new Uri("https://finnhub.io/api/v1/") },
             config,
             memoryCache,
+            finnhubProviderState,
             NullLogger<FinnhubService>.Instance);
 
         var polygon = new PolygonService(
@@ -200,6 +204,7 @@ public sealed class MarketDataServiceReliabilityTests
             news,
             fmp,
             ws,
+            finnhubProviderState,
             new ProviderHealthTracker(),
             new ApiUsageTracker(),
             memoryCache,

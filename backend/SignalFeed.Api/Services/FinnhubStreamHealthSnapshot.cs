@@ -12,5 +12,7 @@ public sealed class FinnhubStreamHealthSnapshot
 
     public DateTimeOffset? RateLimitedUntilUtc { get; set; }
 
+    public long? LastMessageSecondsAgo { get; set; }
+
     public DateTimeOffset TimestampUtc { get; set; }
 }

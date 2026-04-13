@@ -23,6 +23,7 @@ public sealed class MarketDataService : IMarketDataService
     private readonly ExternalNewsApiService _newsApiService;
     private readonly FmpService _fmpService;
     private readonly IFinnhubWebSocketService _quoteStream;
+    private readonly FinnhubProviderState _finnhubProviderState;
     private readonly ProviderHealthTracker _providerHealth;
     private readonly ApiUsageTracker _apiUsageTracker;
     private readonly IMemoryCache _cache;
@@ -44,6 +45,9 @@ public sealed class MarketDataService : IMarketDataService
     private long _cacheMisses;
     private long _staleDataReturns;
     private long _totalQuoteResults;
+    private long _fallbackFinnhubSkippedCount;
+    private long _fallbackPolygonUsedCount;
+    private long _fallbackCacheUsedCount;
 
     public MarketDataService(
         FinnhubService finnhubService,
@@ -51,6 +55,7 @@ public sealed class MarketDataService : IMarketDataService
         ExternalNewsApiService newsApiService,
         FmpService fmpService,
         IFinnhubWebSocketService quoteStream,
+        FinnhubProviderState finnhubProviderState,
         ProviderHealthTracker providerHealth,
         ApiUsageTracker apiUsageTracker,
         IMemoryCache cache,
@@ -61,6 +66,7 @@ public sealed class MarketDataService : IMarketDataService
         _newsApiService = newsApiService;
         _fmpService = fmpService;
         _quoteStream = quoteStream;
+        _finnhubProviderState = finnhubProviderState;
         _providerHealth = providerHealth;
         _apiUsageTracker = apiUsageTracker;
         _cache = cache;
@@ -168,7 +174,10 @@ public sealed class MarketDataService : IMarketDataService
         }
 
         _forceFreshSymbols[symbol.Trim().ToUpperInvariant()] = DateTimeOffset.UtcNow;
-        _ = _quoteStream.SubscribeAsync(symbol);
+        if (_finnhubProviderState.CanUseProvider)
+        {
+            _ = _quoteStream.SubscribeAsync(symbol);
+        }
     }
 
     public MarketDataHealthMetrics GetHealthMetrics()
@@ -177,6 +186,7 @@ public sealed class MarketDataService : IMarketDataService
         var totalQuoteResults = Math.Max(1, Interlocked.Read(ref _totalQuoteResults));
         var staleRatePercent = Math.Round((staleReturns * 100d) / totalQuoteResults, 2);
         var (p50, p95, p99) = GetProviderLatencyPercentiles();
+        var finnhubHealth = _finnhubProviderState.GetSnapshot();
 
         return new MarketDataHealthMetrics
         {
@@ -190,6 +200,12 @@ public sealed class MarketDataService : IMarketDataService
             RateLimitHits = _apiUsageTracker.GetUsageSnapshot().Sum(x => x.RateLimitHits),
             WebsocketReconnectCount = _quoteStream.ReconnectCount,
             CacheHitRatio = ComputeCacheHitRatio(),
+            FinnhubSuccessCount = finnhubHealth.FinnhubSuccessCount,
+            FinnhubFailureCount = finnhubHealth.FinnhubFailureCount,
+            FinnhubKeyInvalidCount = finnhubHealth.FinnhubKeyInvalidCount,
+            FallbackFinnhubSkippedCount = Interlocked.Read(ref _fallbackFinnhubSkippedCount),
+            FallbackPolygonUsedCount = Interlocked.Read(ref _fallbackPolygonUsedCount),
+            FallbackCacheUsedCount = Interlocked.Read(ref _fallbackCacheUsedCount),
             StaleDataReturnCount = staleReturns,
             StaleDataRatePercent = staleRatePercent,
             ProviderLatencyP50Ms = p50,
@@ -207,7 +223,10 @@ public sealed class MarketDataService : IMarketDataService
 
     private async Task<QuoteResponse?> GetOrLoadQuoteAsync(string symbol, CancellationToken cancellationToken)
     {
-        _ = _quoteStream.SubscribeAsync(symbol);
+        if (_finnhubProviderState.CanUseProvider)
+        {
+            _ = _quoteStream.SubscribeAsync(symbol);
+        }
         var cacheKey = $"price:{symbol}:free-tier";
 
         if (_cache.TryGetValue<QuoteResponse>(cacheKey, out var cachedQuote) && IsQuoteUsable(cachedQuote))
@@ -245,7 +264,7 @@ public sealed class MarketDataService : IMarketDataService
     {
         var now = DateTimeOffset.UtcNow;
 
-        if (_quoteStream.TryGetFreshPrice(symbol, out var streamedPrice))
+        if (_finnhubProviderState.CanUseProvider && _quoteStream.TryGetFreshPrice(symbol, out var streamedPrice))
         {
             var age = now - streamedPrice.ReceivedTimestampUtc;
             if (age <= QuoteStaleAfter)
@@ -257,14 +276,23 @@ public sealed class MarketDataService : IMarketDataService
             }
         }
 
-        var finnhubQuote = await SafeProviderQuoteCallAsync(
-            providerName: nameof(FinnhubService),
-            failureThreshold: 3,
-            cooldown: TimeSpan.FromSeconds(60),
-            baseBackoff: TimeSpan.FromSeconds(2),
-            maxBackoff: TimeSpan.FromSeconds(20),
-            call: ct => _finnhubService.GetQuoteAsync(symbol, ct),
-            cancellationToken: cancellationToken);
+        QuoteResponse? finnhubQuote = null;
+        if (_finnhubProviderState.CanUseProvider)
+        {
+            finnhubQuote = await SafeProviderQuoteCallAsync(
+                providerName: nameof(FinnhubService),
+                failureThreshold: 3,
+                cooldown: TimeSpan.FromSeconds(60),
+                baseBackoff: TimeSpan.FromSeconds(2),
+                maxBackoff: TimeSpan.FromSeconds(20),
+                call: ct => _finnhubService.GetQuoteAsync(symbol, ct),
+                cancellationToken: cancellationToken);
+        }
+        else
+        {
+            Interlocked.Increment(ref _fallbackFinnhubSkippedCount);
+            _logger.LogWarning("Skipping Finnhub for {Symbol}; provider unavailable (missing/invalid key).", symbol);
+        }
 
         if (IsQuoteUsable(finnhubQuote))
         {
@@ -276,7 +304,8 @@ public sealed class MarketDataService : IMarketDataService
         }
 
         QuoteResponse? polygonQuote = null;
-        if (TryConsumePolygonBudget())
+        var polygonBudgetAvailable = TryConsumePolygonBudget();
+        if (polygonBudgetAvailable)
         {
             polygonQuote = await SafeProviderQuoteCallAsync(
                 providerName: nameof(PolygonService),
@@ -294,13 +323,19 @@ public sealed class MarketDataService : IMarketDataService
             polygonQuote!.Provider = nameof(PolygonService);
             RefreshQuoteFreshness(polygonQuote);
             Interlocked.Increment(ref _fallbackUsed);
+            Interlocked.Increment(ref _fallbackPolygonUsedCount);
             Interlocked.Increment(ref _totalQuoteResults);
             return polygonQuote;
+        }
+        else if (!polygonBudgetAvailable)
+        {
+            _logger.LogWarning("Polygon fallback budget exhausted. Skipping polygon and using cache fallback for {Symbol}.", symbol);
         }
 
         if (_lastKnownBySymbol.TryGetValue(symbol, out var fallback))
         {
             Interlocked.Increment(ref _fallbackUsed);
+            Interlocked.Increment(ref _fallbackCacheUsedCount);
             Interlocked.Increment(ref _staleDataReturns);
             var copy = CloneQuote(fallback.Quote);
             RefreshQuoteFreshness(copy);
@@ -315,6 +350,7 @@ public sealed class MarketDataService : IMarketDataService
         }
 
         _logger.LogWarning("[API] ALL_FAILED -> {Symbol}", symbol);
+        Interlocked.Increment(ref _fallbackCacheUsedCount);
         return null;
     }
 

@@ -5,7 +5,7 @@ import { FeedList } from "./components/feed/FeedList";
 import { TopOpportunity } from "./components/feed/TopOpportunity";
 import type { FeedFilter, FeedItem } from "./components/feed/types";
 import { getPriceRange } from "./components/feed/utils";
-import { FEED_HUB_URL, FEED_SIM_STATS_URL, FEED_SIM_URL, FEED_URL } from "./config/api";
+import { FEED_HUB_URL, FEED_SIM_STATS_URL, FEED_SIM_URL, FEED_URL, HEALTH_FINNHUB_URL, HEALTH_STREAM_URL, METRICS_SUMMARY_URL } from "./config/api";
 
 const MAX_ITEMS = 100;
 const SIGNAL_EXPIRY_SECONDS = 75;
@@ -30,6 +30,10 @@ const SIM_HEADLINES = [
 const SIM_SOURCES = ["Reuters", "Bloomberg", "CNBC", "Benzinga", "The Fly"];
 const SIM_FLAGS = ["HIGH_CTB", "REG_SHO", "R_S", "HALT", "OFFERING", "FDA"];
 const INCOMING_FLUSH_MS = 120;
+const TOP_MOVERS_CHANGE_THRESHOLD = 2;
+const TOP_MOVERS_SPIKE_THRESHOLD = 20;
+
+type TradingTab = "ALL" | "TOP_MOVERS" | "UNDER_10" | "PINNED";
 
 const requestCache = new Map<string, { expiresAt: number; promise: Promise<unknown> }>();
 
@@ -289,6 +293,12 @@ function getDecayedScore(item: FeedItem, nowMs: number): number {
   return Number((baseScore * factor).toFixed(2));
 }
 
+function getSpikeScore(item: FeedItem): number {
+  const score = item.score ?? item.activityScore;
+  const volumeSpike = Math.max(0, item.volumeRatio ?? (item.volume && item.volume >= 1_000_000 ? 1 : 0));
+  return Number((Math.abs(item.changePercent) * 0.5 + volumeSpike * 0.3 + score * 0.2).toFixed(2));
+}
+
 function playFallbackAlertTone() {
   const AudioCtx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!AudioCtx) {
@@ -319,10 +329,92 @@ function randomPlaybackRate(): number {
   return 0.95 + (Math.random() * 0.1);
 }
 
-function App() {
+function MonitoringPage() {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [metrics, setMetrics] = useState<Record<string, unknown> | null>(null);
+  const [stream, setStream] = useState<Record<string, unknown> | null>(null);
+  const [finnhub, setFinnhub] = useState<Record<string, unknown> | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    const fetchMetrics = async () => {
+      try {
+        const [metricsRes, streamRes, finnhubRes] = await Promise.all([
+          fetch(METRICS_SUMMARY_URL),
+          fetch(HEALTH_STREAM_URL),
+          fetch(HEALTH_FINNHUB_URL),
+        ]);
+
+        const [metricsJson, streamJson, finnhubJson] = await Promise.all([
+          metricsRes.json(),
+          streamRes.json(),
+          finnhubRes.json(),
+        ]);
+
+        if (!mounted) {
+          return;
+        }
+
+        setMetrics(metricsJson as Record<string, unknown>);
+        setStream(streamJson as Record<string, unknown>);
+        setFinnhub(finnhubJson as Record<string, unknown>);
+        setError(null);
+      } catch (err) {
+        if (!mounted) {
+          return;
+        }
+
+        setError(err instanceof Error ? err.message : "Failed to fetch monitoring metrics.");
+      } finally {
+        if (mounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void fetchMetrics();
+    const interval = window.setInterval(() => {
+      void fetchMetrics();
+    }, 10000);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  return (
+    <main className="min-h-screen bg-[#0B0F14] p-4 text-white">
+      <div className="mx-auto max-w-6xl">
+        <h1 className="mb-3 text-sm font-semibold tracking-wide text-slate-200">Monitoring</h1>
+        {loading ? <p className="text-slate-400">Loading metrics...</p> : null}
+        {error ? <p className="mb-3 text-red-300">{error}</p> : null}
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <section className="rounded border border-slate-800 bg-slate-950/70 p-3">
+            <div className="mb-2 text-xs font-semibold text-slate-300">System Metrics</div>
+            <pre className="overflow-x-auto text-[11px] text-slate-200">{JSON.stringify(metrics, null, 2)}</pre>
+          </section>
+          <section className="rounded border border-slate-800 bg-slate-950/70 p-3">
+            <div className="mb-2 text-xs font-semibold text-slate-300">Stream Health</div>
+            <pre className="overflow-x-auto text-[11px] text-slate-200">{JSON.stringify(stream, null, 2)}</pre>
+          </section>
+          <section className="rounded border border-slate-800 bg-slate-950/70 p-3">
+            <div className="mb-2 text-xs font-semibold text-slate-300">Finnhub Health</div>
+            <pre className="overflow-x-auto text-[11px] text-slate-200">{JSON.stringify(finnhub, null, 2)}</pre>
+          </section>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+function TradingDashboardApp() {
   const [items, setItems] = useState<FeedItem[]>([]);
   const [status, setStatus] = useState<"live" | "degraded" | "offline">("degraded");
   const [filter, setFilter] = useState<FeedFilter>("ALL");
+  const [tradingTab, setTradingTab] = useState<TradingTab>("ALL");
+  const [pinnedSymbols, setPinnedSymbols] = useState<Set<string>>(new Set());
   const [autoScroll, setAutoScroll] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [simulationMode, setSimulationMode] = useState(false);
@@ -447,6 +539,19 @@ function App() {
   const pushIncomingSignal = useCallback((item: FeedItem) => {
     enqueueIncomingSignals([item]);
   }, [enqueueIncomingSignals]);
+
+  const togglePinnedSymbol = useCallback((symbol: string) => {
+    setPinnedSymbols((current) => {
+      const next = new Set(current);
+      if (next.has(symbol)) {
+        next.delete(symbol);
+      } else {
+        next.add(symbol);
+      }
+
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -722,6 +827,24 @@ function App() {
     });
   }, [items, filter, nowMs]);
 
+  const tabFiltered = useMemo(() => {
+    if (tradingTab === "UNDER_10") {
+      return filtered.filter((item) => item.price > 0 && item.price < 10);
+    }
+
+    if (tradingTab === "PINNED") {
+      return filtered.filter((item) => pinnedSymbols.has(item.symbol));
+    }
+
+    if (tradingTab === "TOP_MOVERS") {
+      return filtered.filter((item) =>
+        Math.abs(item.changePercent) > TOP_MOVERS_CHANGE_THRESHOLD ||
+        getSpikeScore(item) >= TOP_MOVERS_SPIKE_THRESHOLD);
+    }
+
+    return filtered;
+  }, [filtered, tradingTab, pinnedSymbols]);
+
   const topOpportunity = useMemo(
     () => filtered.find((item) => item.isTopOpportunity) ?? filtered[0],
     [filtered],
@@ -742,7 +865,7 @@ function App() {
 
   const panelItems = useMemo(() => {
     if (!focusMode) {
-      return filtered;
+      return tabFiltered;
     }
 
     const focusSymbols = new Set<string>(watchlistSymbols.slice(0, 4));
@@ -750,8 +873,8 @@ function App() {
       focusSymbols.add(topOpportunity.symbol);
     }
 
-    return filtered.filter((item) => focusSymbols.has(item.symbol));
-  }, [filtered, focusMode, topOpportunity, watchlistSymbols]);
+    return tabFiltered.filter((item) => focusSymbols.has(item.symbol));
+  }, [tabFiltered, focusMode, topOpportunity, watchlistSymbols]);
 
   const freshCount = useMemo(
     () => items.filter((item) => getAgeSeconds(item, nowMs) <= 15).length,
@@ -821,14 +944,31 @@ function App() {
           </section>
 
           <section className="min-h-0 rounded border border-slate-800 bg-slate-950/70 lg:col-span-5">
-            <div className="border-b border-slate-800 px-3 py-2 text-xs font-semibold tracking-wide text-slate-300">
-              Live Signals
+            <div className="border-b border-slate-800 px-3 py-2">
+              <div className="mb-2 text-xs font-semibold tracking-wide text-slate-300">Live Signals</div>
+              <div className="inline-flex rounded border border-slate-700/80 bg-slate-900/60 p-0.5 text-[11px]">
+                {(["ALL", "TOP_MOVERS", "UNDER_10", "PINNED"] as TradingTab[]).map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => setTradingTab(tab)}
+                    className={`px-2 py-1 ${
+                      tradingTab === tab ? "bg-slate-700 text-white" : "text-slate-300"
+                    }`}
+                  >
+                    {tab === "ALL" ? "All" : tab === "TOP_MOVERS" ? "Top Movers" : tab === "UNDER_10" ? "Under $10" : "Pinned"}
+                  </button>
+                ))}
+              </div>
             </div>
             <div ref={feedContainerRef} className="h-[42vh] overflow-y-auto lg:h-[56vh]">
               <FeedList
                 items={panelItems}
+                newsItems={items}
                 nowMs={nowMs}
                 showTopOpportunity={false}
+                pinnedSymbols={pinnedSymbols}
+                onPinToggle={togglePinnedSymbol}
                 onRowSelect={(item) => {
                   setSelectedSignal(item);
                   setRightPanelTab("simulator");
@@ -896,6 +1036,14 @@ function App() {
       </div>
     </main>
   );
+}
+
+function App() {
+  if (typeof window !== "undefined" && window.location.pathname === "/monitoring") {
+    return <MonitoringPage />;
+  }
+
+  return <TradingDashboardApp />;
 }
 
 export default App;

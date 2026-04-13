@@ -12,3 +12,6 @@ export const FEED_URL = `${API}/api/feed`;
 export const FEED_SIM_URL = `${API}/api/feed/simulate`;
 export const FEED_SIM_STATS_URL = `${API}/api/feed/sim-stats`;
 export const FEED_HUB_URL = `${API}/hubs/feed`;
+export const METRICS_SUMMARY_URL = `${API}/metrics/summary`;
+export const HEALTH_STREAM_URL = `${API}/health/stream`;
+export const HEALTH_FINNHUB_URL = `${API}/health/finnhub`;

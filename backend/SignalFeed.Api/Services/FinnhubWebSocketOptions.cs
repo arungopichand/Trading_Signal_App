@@ -10,4 +10,5 @@ public sealed class FinnhubWebSocketOptions
     public int InitialReconnectDelayMs { get; set; } = 1000;
     public int MaxReconnectDelayMs { get; set; } = 30000;
     public int RateLimitCooldownSeconds { get; set; } = 120;
+    public int HeartbeatStaleSeconds { get; set; } = 25;
 }

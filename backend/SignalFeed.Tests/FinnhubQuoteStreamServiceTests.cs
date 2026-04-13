@@ -15,7 +15,10 @@ public sealed class FinnhubQuoteStreamServiceTests
             Token = "test-token",
             MaxSubscribedSymbols = 2
         };
-        var service = new FinnhubQuoteStreamService(new TestOptionsMonitor<FinnhubWebSocketOptions>(options), NullLogger<FinnhubQuoteStreamService>.Instance);
+        var service = new FinnhubQuoteStreamService(
+            new TestOptionsMonitor<FinnhubWebSocketOptions>(options),
+            new FinnhubProviderState(),
+            NullLogger<FinnhubQuoteStreamService>.Instance);
 
         await service.SubscribeAsync("AAPL");
         await service.SubscribeAsync("aapl"); // duplicate
@@ -38,7 +41,10 @@ public sealed class FinnhubQuoteStreamServiceTests
             StaleAfterSeconds = 15,
             MaxSubscribedSymbols = 10
         };
-        var service = new FinnhubQuoteStreamService(new TestOptionsMonitor<FinnhubWebSocketOptions>(options), NullLogger<FinnhubQuoteStreamService>.Instance);
+        var service = new FinnhubQuoteStreamService(
+            new TestOptionsMonitor<FinnhubWebSocketOptions>(options),
+            new FinnhubProviderState(),
+            NullLogger<FinnhubQuoteStreamService>.Instance);
         await service.SubscribeAsync("AAPL");
 
         var processMethod = typeof(FinnhubQuoteStreamService)

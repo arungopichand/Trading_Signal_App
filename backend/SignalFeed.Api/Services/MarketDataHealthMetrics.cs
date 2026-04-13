@@ -22,6 +22,18 @@ public sealed class MarketDataHealthMetrics
 
     public double CacheHitRatio { get; set; }
 
+    public long FinnhubSuccessCount { get; set; }
+
+    public long FinnhubFailureCount { get; set; }
+
+    public long FinnhubKeyInvalidCount { get; set; }
+
+    public long FallbackFinnhubSkippedCount { get; set; }
+
+    public long FallbackPolygonUsedCount { get; set; }
+
+    public long FallbackCacheUsedCount { get; set; }
+
     public long StaleDataReturnCount { get; set; }
 
     public double StaleDataRatePercent { get; set; }

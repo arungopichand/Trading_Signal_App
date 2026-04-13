@@ -51,6 +51,12 @@ public sealed class SimulationSignalService
     private readonly Dictionary<string, int> _trendStrengthBySymbol = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _trendDirectionBySymbol = new(StringComparer.Ordinal);
     private readonly Queue<SimulationStatPoint> _statsWindow = new();
+    private decimal _equity = 100_000m;
+    private decimal _peakEquity = 100_000m;
+    private decimal _maxDrawdownPercent;
+    private int _tradeCount;
+    private int _winCount;
+    private decimal _netPnl;
 
     private MarketPhase _phase = MarketPhase.Quiet;
     private DateTimeOffset _phaseEndsAt = DateTimeOffset.MinValue;
@@ -101,6 +107,7 @@ public sealed class SimulationSignalService
 
         var fallbackCount = Math.Max(0, feedItems.Count - signals.Count);
         RecordStats(now, signals.Count, fallbackCount, feedItems.Count);
+        RecordPerformance(feedItems);
 
         return feedItems
             .OrderByDescending(item => item.IsTopOpportunity)
@@ -128,6 +135,35 @@ public sealed class SimulationSignalService
                 FallbackSignalsPerMinute = fallback,
                 TotalSignalsPerMinute = total,
                 FallbackRatePercent = fallbackRate
+            };
+        }
+    }
+
+    public SimulationPerformanceSnapshot GetPerformanceSnapshot()
+    {
+        lock (_gate)
+        {
+            var winRate = _tradeCount > 0
+                ? Math.Round((_winCount / (decimal)_tradeCount) * 100m, 2)
+                : 0m;
+            var expectancy = _tradeCount > 0
+                ? Math.Round(_netPnl / _tradeCount, 2)
+                : 0m;
+            var currentDrawdown = _peakEquity > 0m
+                ? Math.Round(((_peakEquity - _equity) / _peakEquity) * 100m, 2)
+                : 0m;
+
+            return new SimulationPerformanceSnapshot
+            {
+                TradeCount = _tradeCount,
+                WinCount = _winCount,
+                WinRatePercent = winRate,
+                NetPnl = Math.Round(_netPnl, 2),
+                ExpectancyPerTrade = expectancy,
+                CurrentEquity = Math.Round(_equity, 2),
+                PeakEquity = Math.Round(_peakEquity, 2),
+                CurrentDrawdownPercent = currentDrawdown,
+                MaxDrawdownPercent = Math.Round(_maxDrawdownPercent, 2)
             };
         }
     }
@@ -489,6 +525,56 @@ public sealed class SimulationSignalService
         {
             _statsWindow.Enqueue(new SimulationStatPoint(now, engineCount, fallbackCount, totalCount));
             PruneOldStats(now);
+        }
+    }
+
+    private void RecordPerformance(IReadOnlyList<FeedItem> feedItems)
+    {
+        const decimal positionSize = 10_000m;
+        const decimal slippageRate = 0.0005m;
+        const decimal feePerTrade = 2m;
+
+        var tradable = feedItems
+            .Where(item =>
+                item.SignalType.Equals("SPIKE", StringComparison.OrdinalIgnoreCase) ||
+                item.SignalType.Equals("BULLISH", StringComparison.OrdinalIgnoreCase) ||
+                item.SignalType.Equals("BEARISH", StringComparison.OrdinalIgnoreCase))
+            .Take(3)
+            .ToList();
+
+        if (tradable.Count == 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            foreach (var item in tradable)
+            {
+                var direction = item.SignalType.Equals("BEARISH", StringComparison.OrdinalIgnoreCase) ? -1m : 1m;
+                var grossPnl = direction * (item.ChangePercent / 100m) * positionSize;
+                var slippage = positionSize * slippageRate;
+                var netPnl = grossPnl - slippage - feePerTrade;
+
+                _tradeCount++;
+                if (netPnl > 0m)
+                {
+                    _winCount++;
+                }
+
+                _netPnl += netPnl;
+                _equity += netPnl;
+                if (_equity > _peakEquity)
+                {
+                    _peakEquity = _equity;
+                }
+
+                if (_peakEquity > 0m)
+                {
+                    var drawdownPercent = ((_peakEquity - _equity) / _peakEquity) * 100m;
+                    _maxDrawdownPercent = Math.Max(_maxDrawdownPercent, drawdownPercent);
+                }
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
 using SignalFeed.Api.Models;
+using System.Net;
 
 namespace SignalFeed.Api.Services;
 
@@ -25,17 +26,20 @@ public class FinnhubService : IQuoteProvider
     private readonly IConfiguration _config;
     private readonly IMemoryCache _cache;
     private readonly ILogger<FinnhubService> _logger;
+    private readonly FinnhubProviderState _finnhubProviderState;
     private int _missingKeyWarningLogged;
 
     public FinnhubService(
         HttpClient httpClient,
         IConfiguration config,
         IMemoryCache cache,
+        FinnhubProviderState finnhubProviderState,
         ILogger<FinnhubService> logger)
     {
         _httpClient = httpClient;
         _config = config;
         _cache = cache;
+        _finnhubProviderState = finnhubProviderState;
         _logger = logger;
     }
 
@@ -57,11 +61,14 @@ public class FinnhubService : IQuoteProvider
             if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
             {
                 _logger.LogWarning("Finnhub news request hit the rate limit. Returning an empty news set.");
+                _finnhubProviderState.RecordRateLimit(_logger);
                 return [];
             }
 
             if (!response.IsSuccessStatusCode)
             {
+                var body = await SafeReadBodyAsync(response);
+                _finnhubProviderState.RecordFailure(response.StatusCode, body, "news", _logger);
                 _logger.LogWarning(
                     "Finnhub news request failed with status code {StatusCode}.",
                     response.StatusCode);
@@ -70,6 +77,7 @@ public class FinnhubService : IQuoteProvider
 
             await using var stream = await response.Content.ReadAsStreamAsync();
             var data = await JsonSerializer.DeserializeAsync<List<NewsItem>>(stream, JsonOptions);
+            _finnhubProviderState.RecordSuccess();
             return data ?? [];
         }
         catch (HttpRequestException ex)
@@ -155,12 +163,15 @@ public class FinnhubService : IQuoteProvider
                 _logger.LogWarning(
                     "Finnhub quote request hit the rate limit for {Symbol}. Returning null.",
                     encodedSymbol);
+                _finnhubProviderState.RecordRateLimit(_logger);
                 _logger.LogWarning("Finnhub failed for {symbol}", normalizedSymbol);
                 return null;
             }
 
             if (!response.IsSuccessStatusCode)
             {
+                var body = await SafeReadBodyAsync(response);
+                _finnhubProviderState.RecordFailure(response.StatusCode, body, "quote", _logger);
                 _logger.LogWarning(
                     "Finnhub quote request failed for {Symbol} with status code {StatusCode}.",
                     encodedSymbol,
@@ -180,6 +191,7 @@ public class FinnhubService : IQuoteProvider
 
                 _cache.Set(cacheKey, quote, TimeSpan.FromSeconds(5));
                 _logger.LogInformation("Finnhub success for {symbol}", normalizedSymbol);
+                _finnhubProviderState.RecordSuccess();
             }
             else
             {
@@ -221,11 +233,15 @@ public class FinnhubService : IQuoteProvider
 
             if (!response.IsSuccessStatusCode)
             {
+                var body = await SafeReadBodyAsync(response);
+                _finnhubProviderState.RecordFailure(response.StatusCode, body, "company-profile", _logger);
                 return null;
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync();
-            return await JsonSerializer.DeserializeAsync<CompanyProfileResponse>(stream, JsonOptions);
+            var profile = await JsonSerializer.DeserializeAsync<CompanyProfileResponse>(stream, JsonOptions);
+            _finnhubProviderState.RecordSuccess();
+            return profile;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException)
         {
@@ -254,11 +270,15 @@ public class FinnhubService : IQuoteProvider
 
             if (!response.IsSuccessStatusCode)
             {
+                var body = await SafeReadBodyAsync(response);
+                _finnhubProviderState.RecordFailure(response.StatusCode, body, "basic-financials", _logger);
                 return null;
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync();
-            return await JsonSerializer.DeserializeAsync<BasicFinancialsResponse>(stream, JsonOptions);
+            var financials = await JsonSerializer.DeserializeAsync<BasicFinancialsResponse>(stream, JsonOptions);
+            _finnhubProviderState.RecordSuccess();
+            return financials;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException)
         {
@@ -293,11 +313,14 @@ public class FinnhubService : IQuoteProvider
 
             if (!response.IsSuccessStatusCode)
             {
+                var body = await SafeReadBodyAsync(response);
+                _finnhubProviderState.RecordFailure(response.StatusCode, body, "candles", _logger);
                 return null;
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync();
             var candles = await JsonSerializer.DeserializeAsync<CandleResponse>(stream, JsonOptions);
+            _finnhubProviderState.RecordSuccess();
             return candles?.Status == "ok" ? candles : null;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException)
@@ -339,6 +362,8 @@ public class FinnhubService : IQuoteProvider
 
             if (!response.IsSuccessStatusCode)
             {
+                var body = await SafeReadBodyAsync(response);
+                _finnhubProviderState.RecordFailure(response.StatusCode, body, "company-news-latest", _logger);
                 return null;
             }
 
@@ -353,6 +378,7 @@ public class FinnhubService : IQuoteProvider
                 _cache.Set(cacheKey, latest, TimeSpan.FromSeconds(60));
             }
 
+            _finnhubProviderState.RecordSuccess();
             return latest;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException)
@@ -397,6 +423,8 @@ public class FinnhubService : IQuoteProvider
 
             if (!response.IsSuccessStatusCode)
             {
+                var body = await SafeReadBodyAsync(response, cancellationToken);
+                _finnhubProviderState.RecordFailure(response.StatusCode, body, "company-news", _logger);
                 return [];
             }
 
@@ -404,6 +432,7 @@ public class FinnhubService : IQuoteProvider
             var items = await JsonSerializer.DeserializeAsync<List<NewsItem>>(stream, JsonOptions, cancellationToken);
             var output = (IReadOnlyList<NewsItem>)(items ?? []);
             _cache.Set(cacheKey, output, TimeSpan.FromSeconds(60));
+            _finnhubProviderState.RecordSuccess();
             return output;
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException)
@@ -430,12 +459,15 @@ public class FinnhubService : IQuoteProvider
 
             if (!response.IsSuccessStatusCode)
             {
+                var body = await SafeReadBodyAsync(response, cancellationToken);
+                _finnhubProviderState.RecordFailure(response.StatusCode, body, "symbol-universe", _logger);
                 _logger.LogWarning("Finnhub symbol universe request failed with {StatusCode}.", response.StatusCode);
                 return [];
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             var items = await JsonSerializer.DeserializeAsync<List<FinnhubSymbol>>(stream, JsonOptions, cancellationToken);
+            _finnhubProviderState.RecordSuccess();
             return items ?? [];
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException)
@@ -513,22 +545,42 @@ public class FinnhubService : IQuoteProvider
 
     private bool TryGetApiKey(out string apiKey)
     {
-        apiKey =
-            Environment.GetEnvironmentVariable("FINNHUB__APIKEY")
-            ?? _config["FINNHUB__APIKEY"]
-            ?? _config["Finnhub:ApiKey"]
-            ?? string.Empty;
+        apiKey = FinnhubProviderState.ResolveApiKey(_config);
 
         if (string.IsNullOrWhiteSpace(apiKey))
         {
+            _finnhubProviderState.MarkMissing(_logger);
             if (Interlocked.Exchange(ref _missingKeyWarningLogged, 1) == 0)
             {
-                _logger.LogWarning("FINNHUB__APIKEY missing. Continuing with available data sources.");
+                _logger.LogWarning("FINNHUB KEY MISSING. Continuing with available data sources.");
             }
 
             return false;
         }
 
+        if (!_finnhubProviderState.CanUseProvider)
+        {
+            _logger.LogWarning("FINNHUB KEY INVALID. Skipping Finnhub provider calls.");
+            return false;
+        }
+
         return true;
+    }
+
+    private static async Task<string> SafeReadBodyAsync(HttpResponseMessage response, CancellationToken cancellationToken = default)
+    {
+        if (response.Content is null)
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            return await response.Content.ReadAsStringAsync(cancellationToken);
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 }
