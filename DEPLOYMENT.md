@@ -67,6 +67,7 @@ curl --fail --show-error --silent "$BACKEND_HEALTHCHECK_URL/health/stream" # opt
 - Start command: `dotnet out/SignalFeed.Api.dll`
 - Health endpoint: `/health`
 - Stream health endpoint: `/health/stream`
+- Deploy hook handling in CI: try `POST` first, then fallback to `GET` if method mismatch occurs.
 
 ## Operational Notes
 1. Enable branch protection on `main` and `dev`.
