@@ -53,9 +53,6 @@ jobs:
     name: Deploy Frontend (Vercel)
     runs-on: ubuntu-latest
     needs: build-and-test
-    defaults:
-      run:
-        working-directory: frontend
     env:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
@@ -72,13 +69,13 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --prefix frontend
 
       - name: Deploy to Vercel
         run: |
           for i in 1 2 3; do
             echo "Vercel deploy attempt $i/3"
-            if npx vercel deploy --prod --yes --token "$VERCEL_TOKEN"; then
+            if npx vercel --cwd frontend --prod --yes --token "$VERCEL_TOKEN"; then
               exit 0
             fi
             if [ "$i" -lt 3 ]; then
@@ -89,11 +86,30 @@ jobs:
           echo "::error::Vercel deploy failed after 3 attempts."
           exit 1
 
+  deploy-backend:
+    name: Deploy Backend (Render)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    env:
+      RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+    steps:
+      - name: Validate Render deploy hook secret
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "::error::Missing RENDER_DEPLOY_HOOK secret."
+            exit 1
+          fi
+
+      - name: Trigger Render deploy hook
+        run: |
+          curl --fail --show-error --silent -X POST "$RENDER_DEPLOY_HOOK"
+
   verify-health:
     name: Verify Backend Health
     runs-on: ubuntu-latest
     needs:
       - deploy-frontend
+      - deploy-backend
       - build-and-test
     env:
       BACKEND_HEALTHCHECK_URL: ${{ secrets.BACKEND_HEALTHCHECK_URL }}
@@ -113,25 +129,42 @@ jobs:
           esac
           echo "HEALTH_URL=${BACKEND_HEALTHCHECK_URL%/}/health" >> "$GITHUB_ENV"
 
-      - name: Wait for Render auto-deploy rollout
+      - name: Retry backend health + feed checks
         run: |
-          echo "Polling backend readiness..."
-          for i in {1..12}; do
+          BASE_URL="${BACKEND_HEALTHCHECK_URL%/}"
+          FEED_URL="${BASE_URL}/api/feed?limit=1"
+          STREAM_URL="${BASE_URL}/health/stream"
+
+          echo "Polling backend readiness (max 10 attempts, 10s delay)..."
+          for i in {1..10}; do
+            HEALTH_OK=0
+            FEED_OK=0
+            STREAM_OK=0
+
             if curl --fail --show-error --silent "$HEALTH_URL" > /dev/null; then
-              echo "Backend health is ready."
+              HEALTH_OK=1
+            fi
+
+            if curl --fail --show-error --silent "$FEED_URL" > /dev/null; then
+              FEED_OK=1
+            fi
+
+            if curl --fail --show-error --silent "$STREAM_URL" > /dev/null; then
+              STREAM_OK=1
+            else
+              echo "Optional stream health check failed on attempt $i/10; continuing."
+            fi
+
+            if [ "$HEALTH_OK" -eq 1 ] && [ "$FEED_OK" -eq 1 ]; then
+              echo "Backend checks passed (health + feed)."
+              if [ "$STREAM_OK" -eq 1 ]; then
+                echo "Stream health endpoint is healthy."
+              fi
               exit 0
             fi
-            echo "Attempt $i/12 failed; retrying in 10s..."
+
+            echo "Attempt $i/10 failed; retrying in 10s..."
             sleep 10
           done
-          echo "::error::Backend health endpoint did not become ready in time."
+          echo "::error::Backend did not pass health/feed checks in time."
           exit 1
-
-      - name: Health check must return 200
-        run: |
-          curl --fail --show-error --silent --retry 6 --retry-delay 10 "$HEALTH_URL"
-
-      - name: API smoke test (/api/feed)
-        run: |
-          FEED_URL="${BACKEND_HEALTHCHECK_URL%/}/api/feed?limit=1"
-          curl --fail --show-error --silent --retry 6 --retry-delay 10 "$FEED_URL" > /dev/null
