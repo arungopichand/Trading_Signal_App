@@ -91,16 +91,16 @@ jobs:
           fi
 
       - name: Pull Vercel project settings (production)
-        run: npx vercel pull --yes --environment=production --token "$VERCEL_TOKEN" --cwd frontend
+        run: npx vercel pull --yes --environment=production --token "$VERCEL_TOKEN"
 
       - name: Build frontend artifacts with Vercel
-        run: npx vercel build --prod --token "$VERCEL_TOKEN" --cwd frontend
+        run: npx vercel build --prod --token "$VERCEL_TOKEN"
 
       - name: Deploy prebuilt artifacts to Vercel
         run: |
           for i in 1 2 3; do
             echo "Vercel deploy attempt $i/3"
-            if npx vercel deploy --prebuilt --prod --yes --token "$VERCEL_TOKEN" --cwd frontend; then
+            if npx vercel deploy --prebuilt --prod --yes --token "$VERCEL_TOKEN"; then
               exit 0
             fi
             if [ "$i" -lt 3 ]; then

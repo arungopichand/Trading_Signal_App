@@ -25,7 +25,7 @@ Flow: `Frontend (Vercel) -> Backend API (Render) -> Supabase`
 - Trigger: `push` to `dev` only
 - Actions:
   - Build/test frontend + backend
-  - Frontend preview deploy to Vercel from `frontend/` only
+  - Frontend preview deploy to Vercel project configured with Root Directory `frontend`
   - Backend dev deploy via Render dev hook
   - Backend dev health check
 - Guardrails:
@@ -38,7 +38,7 @@ Flow: `Frontend (Vercel) -> Backend API (Render) -> Supabase`
 - Actions:
   - Build frontend + backend
   - Run tests (deploy jobs require successful build/test)
-  - Deploy frontend to Vercel production from `frontend/` only
+  - Deploy frontend to Vercel production project configured with Root Directory `frontend`
   - Trigger backend deploy via Render deploy hook
   - Retry backend checks up to 10 attempts with 10s delay:
     - `/health`
@@ -67,15 +67,15 @@ Pipeline fails if any build/test/deploy/health step fails.
 
 ### Frontend
 ```bash
-npx vercel pull --yes --environment=preview --token "$VERCEL_TOKEN" --cwd frontend
-npx vercel build --token "$VERCEL_TOKEN" --cwd frontend
-npx vercel deploy --prebuilt --yes --token "$VERCEL_TOKEN" --cwd frontend
+npx vercel pull --yes --environment=preview --token "$VERCEL_TOKEN"
+npx vercel build --token "$VERCEL_TOKEN"
+npx vercel deploy --prebuilt --yes --token "$VERCEL_TOKEN"
 ```
 
 ```bash
-npx vercel pull --yes --environment=production --token "$VERCEL_TOKEN" --cwd frontend
-npx vercel build --prod --token "$VERCEL_TOKEN" --cwd frontend
-npx vercel deploy --prebuilt --prod --yes --token "$VERCEL_TOKEN" --cwd frontend
+npx vercel pull --yes --environment=production --token "$VERCEL_TOKEN"
+npx vercel build --prod --token "$VERCEL_TOKEN"
+npx vercel deploy --prebuilt --prod --yes --token "$VERCEL_TOKEN"
 ```
 
 ### Health Check
@@ -97,6 +97,6 @@ curl --fail --show-error --silent "$BACKEND_HEALTHCHECK_URL/health/stream" # opt
 2. Require PR + passing checks before merge.
 3. Keep secrets only in GitHub/Vercel/Render secret stores.
 4. Vercel project must be the frontend project with **Root Directory = `frontend`**.
-5. Never deploy frontend from repo root in CI.
+5. Use the linked Vercel project and do not override with `--cwd frontend` once Root Directory is `frontend`.
 6. Keep Render service `autoDeployTrigger=commit` for `main`.
 7. Rollback: redeploy previous stable commit SHA in Render and re-run health checks.
