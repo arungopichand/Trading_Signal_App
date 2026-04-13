@@ -89,16 +89,13 @@ jobs:
           fi
 
       - name: Pull Vercel project settings (preview)
-        working-directory: frontend
-        run: npm run vercel:pull:preview -- --token "$VERCEL_TOKEN"
+        run: npm --prefix frontend run vercel:pull:preview -- --token "$VERCEL_TOKEN"
 
       - name: Build frontend artifacts (preview)
-        working-directory: frontend
-        run: npm run vercel:build:preview -- --token "$VERCEL_TOKEN"
+        run: npm --prefix frontend run vercel:build:preview -- --token "$VERCEL_TOKEN"
 
       - name: Deploy prebuilt preview artifacts to Vercel
-        working-directory: frontend
-        run: npm run vercel:deploy:preview -- --token "$VERCEL_TOKEN"
+        run: npm --prefix frontend run vercel:deploy:preview -- --token "$VERCEL_TOKEN"
 
   deploy-backend:
     name: Deploy Backend (Render Dev)
